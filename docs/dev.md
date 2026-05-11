@@ -219,6 +219,7 @@ filtered = signal.sosfiltfilt(sos, np.asarray(data, dtype=np.float32), axis=0)
   - 未勾选 `Save Filtered Data`：直接从原始 memmap 切片导出
   - 勾选后：从滤波结果切片，再 `rad -> int32`
 - 勾选 `Save as txt`：导出为 `txt`，每列对应一个位置点，数据单位为 `rad`
+- `txt` 文件名首段保留源文件原有序号前缀，例如 `0000377-`
 - 文件命名：`build_export_filename()`，格式 `eDAS-<Hz>-<pt>-<start-time>.bin`
 - 二进制导出使用 `tofile()`，保持 frame-major `int32`
 - 文本导出使用 `numpy.savetxt()`，输出 frames x points 的 `rad` 浮点矩阵
@@ -258,9 +259,11 @@ export_slice.tofile(output_path)
 - `Low Cut`、`High Cut` 输入范围限制为 `0~100000`
 - 当勾选 `Save as txt` 时：
   - 导出后缀改为 `.txt`
+  - 文件名前缀保留源文件首端序号
   - 文件名中的时间仍按当前视图起始采样时间生成
   - 导出矩阵按 `frames x points` 写出，每列表示一个位置点
   - 导出数值单位为 `rad`
+- 当未勾选 `Save Filtered Data` 且导出 `txt` 时，数据来源为原始 `bin` 切片，只做 `raw -> rad` 转换，不使用滤波结果
 - 未勾选 `Save Filtered Data` 且导出 `bin` 时，仍直接写原始 `int32` 切片，避免无意义的往返转换
 
 验证记录：

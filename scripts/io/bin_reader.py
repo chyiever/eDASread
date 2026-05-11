@@ -13,6 +13,7 @@ from scripts.core.models import FileMetadata
 POINTS_PATTERN = re.compile(r"-(\d+)pt-")
 SCAN_RATE_PATTERN = re.compile(r"-(\d+)Hz-")
 TIMESTAMP_PATTERN = re.compile(r"-(\d{8}T\d{6}(?:\.\d+)?)\.bin$", re.IGNORECASE)
+LEADING_TOKEN_PATTERN = re.compile(r"^([^-]+)-")
 PHASE_RAD_SCALE = np.float32(np.pi / 32767.0)
 RAW_DTYPE = np.int32
 RAW_BYTES_PER_POINT = np.dtype(RAW_DTYPE).itemsize
@@ -94,11 +95,18 @@ def format_timestamp_for_filename(start_time: datetime) -> str:
     return start_time.strftime("%Y%m%dT%H%M%S.%f")[:-3]
 
 
+def infer_leading_token_from_filename(file_path: str | Path) -> str | None:
+    """Infer the leading token before the first dash in a file name."""
+    match = LEADING_TOKEN_PATTERN.match(Path(file_path).name)
+    return match.group(1) if match else None
+
+
 def build_export_filename(
     metadata: FileMetadata,
     point_count: int,
     time_offset_s: float = 0.0,
     suffix: str = ".bin",
+    preserve_leading_token: bool = False,
 ) -> str:
     """Build an export file name using the requested naming convention."""
     start_time = metadata.start_time or infer_start_time_from_filename(metadata.file_path)
@@ -109,7 +117,12 @@ def build_export_filename(
 
     sample_rate_text = f"{int(round(metadata.sample_rate_hz))}Hz"
     normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
-    return f"eDAS-{sample_rate_text}-{point_count:04d}pt-{start_text}{normalized_suffix}"
+    prefix = ""
+    if preserve_leading_token:
+        leading_token = infer_leading_token_from_filename(metadata.file_path)
+        if leading_token:
+            prefix = f"{leading_token}-"
+    return f"{prefix}eDAS-{sample_rate_text}-{point_count:04d}pt-{start_text}{normalized_suffix}"
 
 
 def read_bin_memmap(metadata: FileMetadata) -> np.memmap:

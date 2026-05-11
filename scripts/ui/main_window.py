@@ -742,6 +742,7 @@ class MainWindow(QMainWindow):
             point_count=point_end - point_start + 1,
             time_offset_s=frame_start / metadata.sample_rate_hz,
             suffix=".txt" if save_as_txt else ".bin",
+            preserve_leading_token=save_as_txt,
         )
         output_path = export_folder / filename
         if save_as_txt:
