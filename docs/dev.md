@@ -218,8 +218,10 @@ filtered = signal.sosfiltfilt(sos, np.asarray(data, dtype=np.float32), axis=0)
 - 规则：
   - 未勾选 `Save Filtered Data`：直接从原始 memmap 切片导出
   - 勾选后：从滤波结果切片，再 `rad -> int32`
+- 勾选 `Save as txt`：导出为 `txt`，每列对应一个位置点，数据单位为 `rad`
 - 文件命名：`build_export_filename()`，格式 `eDAS-<Hz>-<pt>-<start-time>.bin`
-- 最终写盘：`tofile()`，保持 frame-major int32
+- 二进制导出使用 `tofile()`，保持 frame-major `int32`
+- 文本导出使用 `numpy.savetxt()`，输出 frames x points 的 `rad` 浮点矩阵
 
 关键代码：
 
@@ -232,7 +234,46 @@ point_end = min(metadata.points, int(np.ceil(y_range[1]) - 1))
 export_slice.tofile(output_path)
 ```
 
-## 8. 修改建议（后续可选）
+## 8. 2026-05-11 更新记录
+
+本次源码更新目标：
+
+- 调整参数区布局，使 `Point Start / Point End`、`VMin / VMax`、`Low Cut / High Cut` 各自位于同一行
+- 为上述输入框增加明确的数值范围约束，并保持原有字体字号
+- 在导出区域新增 `Save as txt` 选项，和 `Save Filtered Data` 并列显示
+- 新增脚本侧正式 `txt` 导出实现，不直接引用 `singledataread/` 下的临时脚本
+
+涉及源码：
+
+- `scripts/ui/control_panel.py`
+- `scripts/ui/main_window.py`
+- `scripts/io/bin_reader.py`
+- `scripts/io/text_export.py`
+
+实现说明：
+
+- 参数区改为“同一行双参数”布局，并统一增大同一行控件间距，避免标签、输入框和复选框过于拥挤
+- `Point Start`、`Point End` 输入范围限制为 `0~100000`
+- `VMin`、`VMax` 输入范围限制为 `-1000~1000`，保留最多 3 位小数
+- `Low Cut`、`High Cut` 输入范围限制为 `0~100000`
+- 当勾选 `Save as txt` 时：
+  - 导出后缀改为 `.txt`
+  - 文件名中的时间仍按当前视图起始采样时间生成
+  - 导出矩阵按 `frames x points` 写出，每列表示一个位置点
+  - 导出数值单位为 `rad`
+- 未勾选 `Save Filtered Data` 且导出 `bin` 时，仍直接写原始 `int32` 切片，避免无意义的往返转换
+
+验证记录：
+
+- 已执行 `python -m py_compile scripts\\ui\\control_panel.py scripts\\ui\\main_window.py scripts\\io\\bin_reader.py scripts\\io\\text_export.py`
+- 语法检查通过
+
+GitHub 分支记录：
+
+- 本次变更提交目标分支为 `dev`
+- 推送时仅同步源码与文档，不包含 `data`、`dist` 等目录
+
+## 9. 修改建议（后续可选）
 
 - 为绘图和导出增加性能计时日志
 - 为极大文件增加分块显示/分辨率降采样

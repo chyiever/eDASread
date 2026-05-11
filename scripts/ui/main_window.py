@@ -36,6 +36,7 @@ from scripts.io.bin_reader import (
     list_bin_files,
     read_bin_memmap,
 )
+from scripts.io.text_export import write_phase_txt
 from scripts.processing.filters import apply_filter
 from scripts.processing.view_data import prepare_image_matrix
 from scripts.render.space_time_view import SpaceTimeView
@@ -417,6 +418,7 @@ class MainWindow(QMainWindow):
         self.control_panel.low_cut_edit.setText("10")
         self.control_panel.high_cut_edit.clear()
         self.control_panel.save_filtered_checkbox.setChecked(False)
+        self.control_panel.save_as_txt_checkbox.setChecked(False)
         self.control_panel.waveform_point_edit.setText(self.control_panel.point_start_edit.text().strip() or "1")
         self._sync_waveform_point_bounds()
 
@@ -681,17 +683,28 @@ class MainWindow(QMainWindow):
         export_folder.mkdir(parents=True, exist_ok=True)
 
         save_filtered = self.control_panel.save_filtered_checkbox.isChecked()
+        save_as_txt = self.control_panel.save_as_txt_checkbox.isChecked()
         filter_config = self._build_filter_config() if save_filtered else FilterConfig()
 
         self.statusBar().showMessage("Exporting current view ...")
-        worker = FunctionWorker(self._export_current_view_data, export_folder, filter_config)
+        worker = FunctionWorker(
+            self._export_current_view_data,
+            export_folder,
+            filter_config,
+            save_as_txt,
+        )
         self._active_workers.add(worker)
         worker.signals.result.connect(self._on_export_finished)
         worker.signals.error.connect(self._show_error)
         worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
         self.thread_pool.start(worker)
 
-    def _export_current_view_data(self, export_folder: Path, filter_config: FilterConfig) -> dict:
+    def _export_current_view_data(
+        self,
+        export_folder: Path,
+        filter_config: FilterConfig,
+        save_as_txt: bool,
+    ) -> dict:
         if self.current_metadata is None:
             raise ValueError("No file loaded.")
 
@@ -717,33 +730,46 @@ class MainWindow(QMainWindow):
                 export_data = apply_filter(phase_data, metadata.sample_rate_hz, filter_config)
                 self.processed_cache.put(cache_key, export_data, int(export_data.nbytes))
 
-            export_slice = np.ascontiguousarray(
-                convert_radians_to_raw(export_data[frame_slice, point_slice])
-            )
+            export_phase_slice = np.ascontiguousarray(export_data[frame_slice, point_slice], dtype=np.float32)
+            export_raw_slice = None
         else:
             raw_data = read_bin_memmap(metadata)
-            export_slice = np.ascontiguousarray(raw_data[frame_slice, point_slice], dtype=np.int32)
+            export_raw_slice = np.ascontiguousarray(raw_data[frame_slice, point_slice], dtype=np.int32)
+            export_phase_slice = convert_raw_to_radians(export_raw_slice)
 
         filename = build_export_filename(
             metadata=metadata,
             point_count=point_end - point_start + 1,
             time_offset_s=frame_start / metadata.sample_rate_hz,
+            suffix=".txt" if save_as_txt else ".bin",
         )
         output_path = export_folder / filename
-        export_slice.tofile(output_path)
+        if save_as_txt:
+            write_phase_txt(output_path, export_phase_slice)
+            export_dtype = str(export_phase_slice.dtype)
+            export_format = "txt"
+        else:
+            if export_raw_slice is None:
+                export_slice = np.ascontiguousarray(convert_radians_to_raw(export_phase_slice))
+            else:
+                export_slice = export_raw_slice
+            export_slice.tofile(output_path)
+            export_dtype = str(export_slice.dtype)
+            export_format = "bin"
         return {
             "output_path": output_path,
-            "frame_count": export_slice.shape[0],
-            "point_count": export_slice.shape[1],
+            "frame_count": export_phase_slice.shape[0],
+            "point_count": export_phase_slice.shape[1],
             "filtered": filter_config.is_enabled(),
-            "dtype": str(export_slice.dtype),
+            "dtype": export_dtype,
+            "format": export_format,
         }
 
     def _on_export_finished(self, payload: dict) -> None:
         filtered_text = "filtered" if payload["filtered"] else "unfiltered"
         self.statusBar().showMessage(
             (
-                f"Exported {filtered_text} view to {payload['output_path']} | "
+                f"Exported {filtered_text} {payload['format']} view to {payload['output_path']} | "
                 f"Frames: {payload['frame_count']} | Points: {payload['point_count']} | "
                 f"Type: {payload['dtype']}"
             )

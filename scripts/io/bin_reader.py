@@ -98,6 +98,7 @@ def build_export_filename(
     metadata: FileMetadata,
     point_count: int,
     time_offset_s: float = 0.0,
+    suffix: str = ".bin",
 ) -> str:
     """Build an export file name using the requested naming convention."""
     start_time = metadata.start_time or infer_start_time_from_filename(metadata.file_path)
@@ -107,7 +108,8 @@ def build_export_filename(
         start_text = "unknown"
 
     sample_rate_text = f"{int(round(metadata.sample_rate_hz))}Hz"
-    return f"eDAS-{sample_rate_text}-{point_count:04d}pt-{start_text}.bin"
+    normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"eDAS-{sample_rate_text}-{point_count:04d}pt-{start_text}{normalized_suffix}"
 
 
 def read_bin_memmap(metadata: FileMetadata) -> np.memmap:

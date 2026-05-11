@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtGui import QFont, QIntValidator
+from PyQt5.QtGui import QDoubleValidator, QFont, QIntValidator
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -119,6 +119,7 @@ class ControlPanel(QWidget):
         self.export_path_edit = QLineEdit()
         self.export_path_edit.setPlaceholderText("Export folder")
         self.save_filtered_checkbox = QCheckBox("Save Filtered Data")
+        self.save_as_txt_checkbox = QCheckBox("Save as txt")
 
         self.browse_export_button = QPushButton("Browse Export")
         self.export_button = QPushButton("Export Current View")
@@ -137,7 +138,21 @@ class ControlPanel(QWidget):
             self.waveform_point_edit,
         ]:
             widget.setFont(ui_font)
-        self.save_filtered_checkbox.setFont(ui_font)
+        for checkbox in [self.save_filtered_checkbox, self.save_as_txt_checkbox]:
+            checkbox.setFont(ui_font)
+
+        point_validator = QIntValidator(0, 100000, self)
+        cutoff_validator = QDoubleValidator(0.0, 100000.0, 3, self)
+        cutoff_validator.setNotation(QDoubleValidator.StandardNotation)
+        color_validator = QDoubleValidator(-1000.0, 1000.0, 3, self)
+        color_validator.setNotation(QDoubleValidator.StandardNotation)
+
+        self.point_start_edit.setValidator(point_validator)
+        self.point_end_edit.setValidator(point_validator)
+        self.low_cut_edit.setValidator(cutoff_validator)
+        self.high_cut_edit.setValidator(cutoff_validator)
+        self.vmin_edit.setValidator(color_validator)
+        self.vmax_edit.setValidator(color_validator)
 
         for button in [*self.action_buttons, self.browse_export_button, self.export_button]:
             button.setFont(ui_font)
@@ -150,18 +165,26 @@ class ControlPanel(QWidget):
         point_group.setFont(ui_font)
         point_form = QFormLayout(point_group)
         point_form.setContentsMargins(8, 8, 8, 8)
-        point_form.setHorizontalSpacing(8)
-        point_form.setVerticalSpacing(6)
-        point_form.addRow(QLabel("Point Start"), self.point_start_edit)
-        point_form.addRow(QLabel("Point End"), self.point_end_edit)
-        point_form.addRow(QLabel("VMin"), self.vmin_edit)
-        point_form.addRow(QLabel("VMax"), self.vmax_edit)
+        point_form.setHorizontalSpacing(10)
+        point_form.setVerticalSpacing(8)
+        point_form.addRow(QLabel("Point Range"), self._build_labeled_pair_row(
+            "Point Start",
+            self.point_start_edit,
+            "Point End",
+            self.point_end_edit,
+        ))
+        point_form.addRow(QLabel("Color Range"), self._build_labeled_pair_row(
+            "VMin",
+            self.vmin_edit,
+            "VMax",
+            self.vmax_edit,
+        ))
         point_form.addRow(QLabel("Colormap"), self.colormap_combo)
 
         controls_row_widget = QWidget()
         controls_row_layout = QHBoxLayout(controls_row_widget)
         controls_row_layout.setContentsMargins(0, 0, 0, 0)
-        controls_row_layout.setSpacing(6)
+        controls_row_layout.setSpacing(8)
         for button in self.action_buttons:
             controls_row_layout.addWidget(button, 1)
         controls_row_layout.addSpacing(8)
@@ -172,19 +195,35 @@ class ControlPanel(QWidget):
         filter_group = QGroupBox("Filter")
         filter_group.setFont(ui_font)
         filter_form = QFormLayout(filter_group)
+        filter_form.setContentsMargins(8, 8, 8, 8)
+        filter_form.setHorizontalSpacing(10)
+        filter_form.setVerticalSpacing(8)
         filter_form.addRow(QLabel("Type"), self.filter_type_combo)
-        filter_form.addRow(QLabel("Low Cut (Hz)"), self.low_cut_edit)
-        filter_form.addRow(QLabel("High Cut (Hz)"), self.high_cut_edit)
+        filter_form.addRow(QLabel("Cutoff (Hz)"), self._build_labeled_pair_row(
+            "Low Cut",
+            self.low_cut_edit,
+            "High Cut",
+            self.high_cut_edit,
+        ))
 
         export_group = QGroupBox("Export")
         export_group.setFont(ui_font)
         export_layout = QVBoxLayout(export_group)
+        export_layout.setContentsMargins(8, 8, 8, 8)
+        export_layout.setSpacing(8)
         export_path_row = QHBoxLayout()
+        export_path_row.setSpacing(8)
         export_path_row.addWidget(self.export_path_edit, 1)
         export_path_row.addWidget(self.browse_export_button)
         export_path_row.addWidget(self.export_button)
         export_layout.addLayout(export_path_row)
-        export_layout.addWidget(self.save_filtered_checkbox)
+        export_option_row = QHBoxLayout()
+        export_option_row.setContentsMargins(0, 0, 0, 0)
+        export_option_row.setSpacing(12)
+        export_option_row.addWidget(self.save_filtered_checkbox)
+        export_option_row.addWidget(self.save_as_txt_checkbox)
+        export_option_row.addStretch(1)
+        export_layout.addLayout(export_option_row)
 
         right_column = QVBoxLayout()
         right_column.setContentsMargins(0, 0, 0, 0)
@@ -210,6 +249,30 @@ class ControlPanel(QWidget):
 
     def set_waveform_point_bounds(self, minimum: int, maximum: int) -> None:
         self.waveform_point_edit.set_bounds(minimum, maximum)
+
+    def _build_labeled_pair_row(
+        self,
+        left_label_text: str,
+        left_widget: QWidget,
+        right_label_text: str,
+        right_widget: QWidget,
+    ) -> QWidget:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(10)
+
+        left_label = QLabel(left_label_text)
+        right_label = QLabel(right_label_text)
+        left_label.setFont(left_widget.font())
+        right_label.setFont(right_widget.font())
+
+        row_layout.addWidget(left_label)
+        row_layout.addWidget(left_widget, 1)
+        row_layout.addSpacing(6)
+        row_layout.addWidget(right_label)
+        row_layout.addWidget(right_widget, 1)
+        return row_widget
 
     def _choose_export_directory(self) -> None:
         directory = QFileDialog.getExistingDirectory(
