@@ -3,24 +3,52 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 
 from scripts.core.models import FileMetadata
+from scripts.io.bz_codec import (
+    DEFAULT_BLOCK_VALUES,
+    DEFAULT_ZSTD_LEVEL,
+    BZ_SUFFIXES,
+    BitshuffleZstdCompressor,
+    RawPacket,
+    is_bz_path,
+    pack_bz_file_header,
+    read_bz_file,
+    scan_bz_file,
+)
 
 POINTS_PATTERN = re.compile(r"-(\d+)pt-")
 SCAN_RATE_PATTERN = re.compile(r"-(\d+)Hz-")
-TIMESTAMP_PATTERN = re.compile(r"-(\d{8}T\d{6}(?:\.\d+)?)\.bin$", re.IGNORECASE)
+TIMESTAMP_PATTERN = re.compile(r"-(\d{8}T\d{6}(?:\.\d+)?)\.(?:bin|bz|bzs)$", re.IGNORECASE)
 LEADING_TOKEN_PATTERN = re.compile(r"^([^-]+)-")
 PHASE_RAD_SCALE = np.float32(np.pi / 32767.0)
 RAW_DTYPE = np.int32
 RAW_BYTES_PER_POINT = np.dtype(RAW_DTYPE).itemsize
+DATA_SUFFIXES = {".bin", *BZ_SUFFIXES}
 
 
 def list_bin_files(folder_path: str | Path) -> list[Path]:
-    """List all bin files in one directory in lexicographic order."""
+    """List all supported data files in one directory in lexicographic order."""
+    folder = Path(folder_path)
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Path is not a directory: {folder}")
+
+    return sorted(
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() in DATA_SUFFIXES
+    )
+
+
+def list_raw_bin_files(folder_path: str | Path) -> list[Path]:
+    """List only uncompressed bin files in one directory."""
     folder = Path(folder_path)
     if not folder.exists():
         raise FileNotFoundError(f"Folder not found: {folder}")
@@ -48,6 +76,14 @@ def inspect_bin_file(file_path: str | Path) -> FileMetadata:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
+    if is_bz_path(path):
+        return _inspect_bz_file(path)
+
+    return _inspect_raw_bin_file(path)
+
+
+def _inspect_raw_bin_file(path: Path) -> FileMetadata:
+    """Parse metadata and validate one uncompressed bin file."""
     points = infer_points_from_filename(path)
     sample_rate_hz = infer_sample_rate_from_filename(path)
     if points is None or sample_rate_hz is None:
@@ -75,6 +111,32 @@ def inspect_bin_file(file_path: str | Path) -> FileMetadata:
         frame_count=frame_count,
         duration_s=duration_s,
         file_size_bytes=file_size_bytes,
+        start_time=infer_start_time_from_filename(path),
+    )
+
+
+def _inspect_bz_file(path: Path) -> FileMetadata:
+    """Parse metadata and validate one compressed bz file."""
+    info = scan_bz_file(path)
+
+    filename_points = infer_points_from_filename(path)
+    filename_sample_rate = infer_sample_rate_from_filename(path)
+    if filename_points is not None and filename_points != info.points:
+        raise ValueError(
+            f"File name point count {filename_points} does not match bz header {info.points}"
+        )
+    if filename_sample_rate is not None and filename_sample_rate != info.sample_rate_hz:
+        raise ValueError(
+            f"File name sample rate {filename_sample_rate:g} does not match bz header {info.sample_rate_hz:g}"
+        )
+
+    return FileMetadata(
+        file_path=path,
+        sample_rate_hz=info.sample_rate_hz,
+        points=info.points,
+        frame_count=info.frame_count,
+        duration_s=info.frame_count / info.sample_rate_hz,
+        file_size_bytes=info.compressed_size_bytes,
         start_time=infer_start_time_from_filename(path),
     )
 
@@ -125,8 +187,11 @@ def build_export_filename(
     return f"{prefix}eDAS-{sample_rate_text}-{point_count:04d}pt-{start_text}{normalized_suffix}"
 
 
-def read_bin_memmap(metadata: FileMetadata) -> np.memmap:
-    """Map a phase bin file into a 2D int32 array shaped as frames x points."""
+def read_bin_memmap(metadata: FileMetadata) -> np.ndarray:
+    """Read a phase data file as a 2D int32 array shaped as frames x points."""
+    if is_bz_path(metadata.file_path):
+        return read_bz_file(metadata.file_path)
+
     return np.memmap(
         metadata.file_path,
         dtype=RAW_DTYPE,
@@ -145,3 +210,238 @@ def convert_radians_to_raw(phase_data: np.ndarray) -> np.ndarray:
 def convert_raw_to_radians(raw_data: np.ndarray) -> np.ndarray:
     """Convert raw int32 values to phase radians as float32."""
     return np.asarray(raw_data, dtype=np.float32) * PHASE_RAD_SCALE
+
+
+def compress_bin_to_bz_file(
+    input_path: str | Path,
+    output_path: str | Path | None = None,
+    *,
+    packet_seconds: float = 1.0,
+    zstd_level: int = DEFAULT_ZSTD_LEVEL,
+    block_values: int = DEFAULT_BLOCK_VALUES,
+    overwrite: bool = False,
+    progress_callback=None,
+    progress_base_bytes: int = 0,
+    progress_total_bytes: int | None = None,
+    file_index: int = 1,
+    file_count: int = 1,
+) -> dict:
+    """Compress one raw bin file into the bz packet format."""
+    started_at = time.perf_counter()
+    source = Path(input_path)
+    if source.suffix.lower() != ".bin":
+        raise ValueError(f"Only .bin files can be compressed to bz: {source}")
+
+    metadata = _inspect_raw_bin_file(source)
+    progress_total = progress_total_bytes or metadata.file_size_bytes
+    target = Path(output_path) if output_path is not None else source.with_suffix(".bz")
+    if target.exists() and not overwrite:
+        _emit_compression_progress(
+            progress_callback,
+            current_bytes=progress_base_bytes + metadata.file_size_bytes,
+            total_bytes=progress_total,
+            file_index=file_index,
+            file_count=file_count,
+            file_name=source.name,
+            status="skipped",
+        )
+        return {
+            "input_path": source,
+            "output_path": target,
+            "skipped": True,
+            "reason": "output_exists",
+            "packets": 0,
+            "raw_bytes": metadata.file_size_bytes,
+            "compressed_bytes": target.stat().st_size,
+            "elapsed_s": time.perf_counter() - started_at,
+        }
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    scan_rate_hz = int(round(metadata.sample_rate_hz))
+    if not np.isclose(metadata.sample_rate_hz, scan_rate_hz):
+        raise ValueError(f"Sample rate must be an integer for bz header: {metadata.sample_rate_hz}")
+
+    frames_per_packet = max(1, int(round(scan_rate_hz * float(packet_seconds))))
+    timestamp_base_ns = _metadata_start_time_ns(metadata)
+    raw = read_bin_memmap(metadata)
+    compressor = BitshuffleZstdCompressor(
+        zstd_level=zstd_level,
+        block_values=block_values,
+    )
+
+    total_packets = 0
+    file_header = pack_bz_file_header(
+        scan_rate_hz=scan_rate_hz,
+        points_per_frame=metadata.points,
+        channel_num=1,
+        data_source=0,
+        storage_downsample_factor=1,
+        packet_frames=frames_per_packet,
+        file_duration_s=max(1, int(round(metadata.duration_s))),
+        zstd_level=zstd_level,
+        bitshuffle_block_values=block_values,
+        created_timestamp_ns=timestamp_base_ns or None,
+    )
+    total_compressed_bytes = len(file_header)
+    processed_file_bytes = 0
+    _emit_compression_progress(
+        progress_callback,
+        current_bytes=progress_base_bytes,
+        total_bytes=progress_total,
+        file_index=file_index,
+        file_count=file_count,
+        file_name=source.name,
+        status="compressing",
+    )
+    with target.open("wb", buffering=1024 * 1024) as file:
+        file.write(file_header)
+        for frame_start in range(0, metadata.frame_count, frames_per_packet):
+            frame_end = min(metadata.frame_count, frame_start + frames_per_packet)
+            samples = np.ascontiguousarray(raw[frame_start:frame_end, :], dtype=RAW_DTYPE)
+            packet = RawPacket(
+                packet_index=total_packets,
+                timestamp_ns=timestamp_base_ns + int(round(frame_start * 1_000_000_000 / scan_rate_hz)),
+                scan_rate_hz=scan_rate_hz,
+                points_per_frame=metadata.points,
+                frames=samples.shape[0],
+                samples=samples,
+            )
+            compressed = compressor.compress_packet(packet)
+            file.write(compressed.header)
+            file.write(compressed.payload)
+            total_packets += 1
+            total_compressed_bytes += len(compressed.header) + len(compressed.payload)
+            processed_file_bytes += int(samples.nbytes)
+            _emit_compression_progress(
+                progress_callback,
+                current_bytes=progress_base_bytes + processed_file_bytes,
+                total_bytes=progress_total,
+                file_index=file_index,
+                file_count=file_count,
+                file_name=source.name,
+                status="compressing",
+            )
+
+    return {
+        "input_path": source,
+        "output_path": target,
+        "skipped": False,
+        "packets": total_packets,
+        "raw_bytes": metadata.file_size_bytes,
+        "compressed_bytes": total_compressed_bytes,
+        "compression_ratio": metadata.file_size_bytes / total_compressed_bytes
+        if total_compressed_bytes
+        else float("inf"),
+        "elapsed_s": time.perf_counter() - started_at,
+    }
+
+
+def batch_compress_bin_folder(
+    input_folder: str | Path,
+    output_folder: str | Path | None = None,
+    *,
+    packet_seconds: float = 1.0,
+    zstd_level: int = DEFAULT_ZSTD_LEVEL,
+    block_values: int = DEFAULT_BLOCK_VALUES,
+    overwrite: bool = False,
+    progress_callback=None,
+) -> dict:
+    """Compress every .bin file in one folder into .bz files."""
+    started_at = time.perf_counter()
+    source_folder = Path(input_folder)
+    target_folder = Path(output_folder) if output_folder is not None else source_folder
+    bin_files = list_raw_bin_files(source_folder)
+    if not bin_files:
+        raise ValueError(f"No .bin files found in {source_folder}")
+
+    target_folder.mkdir(parents=True, exist_ok=True)
+    results = []
+    progress_total_bytes = sum(path.stat().st_size for path in bin_files)
+    progress_base_bytes = 0
+    for index, source in enumerate(bin_files, start=1):
+        target = target_folder / source.with_suffix(".bz").name
+        result = compress_bin_to_bz_file(
+            source,
+            target,
+            packet_seconds=packet_seconds,
+            zstd_level=zstd_level,
+            block_values=block_values,
+            overwrite=overwrite,
+            progress_callback=progress_callback,
+            progress_base_bytes=progress_base_bytes,
+            progress_total_bytes=progress_total_bytes,
+            file_index=index,
+            file_count=len(bin_files),
+        )
+        results.append(result)
+        progress_base_bytes += int(result["raw_bytes"])
+
+    converted = [item for item in results if not item.get("skipped")]
+    skipped = [item for item in results if item.get("skipped")]
+    raw_bytes = sum(int(item["raw_bytes"]) for item in results)
+    compressed_bytes = sum(int(item["compressed_bytes"]) for item in results)
+    converted_raw_bytes = sum(int(item["raw_bytes"]) for item in converted)
+    converted_compressed_bytes = sum(int(item["compressed_bytes"]) for item in converted)
+    elapsed_s = time.perf_counter() - started_at
+    throughput_mib_s = (converted_raw_bytes / 1024 / 1024 / elapsed_s) if elapsed_s > 0 else 0.0
+    _emit_compression_progress(
+        progress_callback,
+        current_bytes=progress_total_bytes,
+        total_bytes=progress_total_bytes,
+        file_index=len(bin_files),
+        file_count=len(bin_files),
+        file_name="",
+        status="finished",
+    )
+    return {
+        "input_folder": source_folder,
+        "output_folder": target_folder,
+        "total": len(results),
+        "converted": len(converted),
+        "skipped": len(skipped),
+        "raw_bytes": raw_bytes,
+        "compressed_bytes": compressed_bytes,
+        "converted_raw_bytes": converted_raw_bytes,
+        "converted_compressed_bytes": converted_compressed_bytes,
+        "compression_ratio": raw_bytes / compressed_bytes if compressed_bytes else float("inf"),
+        "converted_compression_ratio": converted_raw_bytes / converted_compressed_bytes
+        if converted_compressed_bytes
+        else 0.0,
+        "compression_percent": (converted_compressed_bytes / converted_raw_bytes * 100.0)
+        if converted_raw_bytes
+        else 0.0,
+        "elapsed_s": elapsed_s,
+        "throughput_mib_s": throughput_mib_s,
+        "results": results,
+    }
+
+
+def _metadata_start_time_ns(metadata: FileMetadata) -> int:
+    if metadata.start_time is None:
+        return 0
+    return int(metadata.start_time.timestamp() * 1_000_000_000)
+
+
+def _emit_compression_progress(
+    progress_callback,
+    *,
+    current_bytes: int,
+    total_bytes: int,
+    file_index: int,
+    file_count: int,
+    file_name: str,
+    status: str,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "current_bytes": max(0, int(current_bytes)),
+            "total_bytes": max(1, int(total_bytes)),
+            "file_index": int(file_index),
+            "file_count": int(file_count),
+            "file_name": file_name,
+            "status": status,
+        }
+    )

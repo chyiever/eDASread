@@ -12,6 +12,7 @@ from PyQt5.QtGui import QFont, QTransform
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from scripts.core.models import FileMetadata
+from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.time_axis import TimeAxisItem
 
 
@@ -85,10 +86,8 @@ class SpaceTimeView(QWidget):
         self.plot_widget.showGrid(x=True, y=True, alpha=0.15)
         self.plot_widget.setLabel("left", "Point Index")
         self.plot_widget.setLabel("bottom", "Time")
-        self.plot_widget.getAxis("left").setStyle(tickFont=axis_font)
-        self.plot_widget.getAxis("bottom").setStyle(tickFont=axis_font)
-        self.plot_widget.getAxis("left").label.setFont(label_font)
-        self.plot_widget.getAxis("bottom").label.setFont(label_font)
+        style_axis(self.plot_widget.getAxis("left"), axis_font, label_font)
+        style_axis(self.plot_widget.getAxis("bottom"), axis_font, label_font)
 
         self.image_item = pg.ImageItem(axisOrder="row-major")
         self.plot_widget.addItem(self.image_item)
@@ -102,11 +101,9 @@ class SpaceTimeView(QWidget):
         self.waveform_plot.showGrid(x=True, y=True, alpha=0.15)
         self.waveform_plot.setLabel("left", "Phase", units="rad")
         self.waveform_plot.setLabel("bottom", "Time")
-        self.waveform_plot.setTitle("指定位置点时域波形")
-        self.waveform_plot.getAxis("left").setStyle(tickFont=axis_font)
-        self.waveform_plot.getAxis("bottom").setStyle(tickFont=axis_font)
-        self.waveform_plot.getAxis("left").label.setFont(label_font)
-        self.waveform_plot.getAxis("bottom").label.setFont(label_font)
+        self.waveform_plot.setTitle("指定位置点时域波形", color=AXIS_TEXT_COLOR)
+        style_axis(self.waveform_plot.getAxis("left"), axis_font, label_font)
+        style_axis(self.waveform_plot.getAxis("bottom"), axis_font, label_font)
         self.waveform_plot.getViewBox().setMouseEnabled(x=True, y=True)
         self.waveform_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.waveform_curve = self.waveform_plot.plot(pen=pg.mkPen(color="#0f5ea8", width=1.8))
@@ -127,8 +124,7 @@ class SpaceTimeView(QWidget):
         self.histogram_widget.setFixedWidth(150)
         self.histogram_widget.setBackground("w")
         self.histogram_widget.item.axis.setLabel(text="Amplitude", units="rad")
-        self.histogram_widget.item.axis.setStyle(tickFont=axis_font)
-        self.histogram_widget.item.axis.label.setFont(label_font)
+        style_axis(self.histogram_widget.item.axis, axis_font, label_font)
         self._apply_colormap(self._colormap_name)
 
         lower_row_widget = QWidget()

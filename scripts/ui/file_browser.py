@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -30,6 +31,13 @@ class FileBrowserPanel(QWidget):
         self.path_edit.setFont(ui_font)
         self.browse_button = QPushButton("Browse")
         self.browse_button.setFont(ui_font)
+        self.compress_bz_button = QPushButton("Batch Bin -> bz")
+        self.compress_bz_button.setFont(ui_font)
+        self.sort_combo = QComboBox()
+        self.sort_combo.setFont(ui_font)
+        self.sort_combo.addItem("Name", "name_asc")
+        self.sort_combo.addItem("Modified: Newest", "mtime_desc")
+        self.sort_combo.addItem("Modified: Oldest", "mtime_asc")
         self.file_list = QListWidget()
         self.file_list.setFont(ui_font)
         self.previous_button = QPushButton("Previous 100")
@@ -46,6 +54,13 @@ class FileBrowserPanel(QWidget):
         path_row = QHBoxLayout()
         path_row.addWidget(self.path_edit, 1)
         path_row.addWidget(self.browse_button)
+        path_row.addWidget(self.compress_bz_button)
+
+        sort_row = QHBoxLayout()
+        sort_label = QLabel("Sort")
+        sort_label.setFont(ui_font)
+        sort_row.addWidget(sort_label)
+        sort_row.addWidget(self.sort_combo, 1)
 
         paging_row = QHBoxLayout()
         paging_row.addWidget(self.previous_button)
@@ -55,6 +70,7 @@ class FileBrowserPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(path_row)
+        layout.addLayout(sort_row)
         layout.addWidget(self.file_list, 1)
         layout.addLayout(paging_row)
         layout.addWidget(self.page_label)

@@ -12,22 +12,27 @@ class WorkerSignals(QObject):
 
     finished = pyqtSignal()
     error = pyqtSignal(str)
+    progress = pyqtSignal(object)
     result = pyqtSignal(object)
 
 
 class FunctionWorker(QRunnable):
     """Execute one Python callable on a thread-pool worker thread."""
 
-    def __init__(self, fn, *args, **kwargs) -> None:
+    def __init__(self, fn, *args, progress_callback_arg: str | None = None, **kwargs) -> None:
         super().__init__()
         self.fn = fn
         self.args = args
         self.kwargs = kwargs
+        self.progress_callback_arg = progress_callback_arg
         self.signals = WorkerSignals()
 
     def run(self) -> None:
         try:
-            result = self.fn(*self.args, **self.kwargs)
+            kwargs = dict(self.kwargs)
+            if self.progress_callback_arg is not None:
+                kwargs[self.progress_callback_arg] = self.signals.progress.emit
+            result = self.fn(*self.args, **kwargs)
         except Exception:
             self.signals.error.emit(traceback.format_exc())
         else:

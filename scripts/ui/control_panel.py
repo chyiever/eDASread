@@ -84,6 +84,7 @@ class ControlPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         ui_font = QFont("Times New Roman", 10)
+        compact_font = QFont("Times New Roman", 9)
 
         self.point_start_edit = QLineEdit("1")
         self.point_end_edit = QLineEdit("100")
@@ -109,6 +110,21 @@ class ControlPanel(QWidget):
         self.waveform_point_label = QLabel("指定位置点时域绘图")
         self.waveform_point_edit = WheelIntLineEdit("1")
         self.waveform_point_edit.setFixedWidth(90)
+        self.play_waveform_button = QPushButton("播放波形")
+
+        self.spike_button = QPushButton("去尖峰噪声")
+        self.common_button = QPushButton("去共模噪声")
+        self.random_button = QPushButton("去随机噪声")
+        self.fk_filter_button = QPushButton("FK滤波")
+        self.denoise_buttons = [
+            self.spike_button,
+            self.common_button,
+            self.random_button,
+            self.fk_filter_button,
+        ]
+        self.fk_spacing_edit = QLineEdit("5")
+        self.fk_vmin_edit = QLineEdit("800")
+        self.fk_vmax_edit = QLineEdit("1200")
 
         self.filter_type_combo = QComboBox()
         self.filter_type_combo.addItems(["none", "lowpass", "highpass", "bandpass"])
@@ -136,6 +152,9 @@ class ControlPanel(QWidget):
             self.export_path_edit,
             self.waveform_point_label,
             self.waveform_point_edit,
+            self.fk_spacing_edit,
+            self.fk_vmin_edit,
+            self.fk_vmax_edit,
         ]:
             widget.setFont(ui_font)
         for checkbox in [self.save_filtered_checkbox, self.save_as_txt_checkbox]:
@@ -146,6 +165,8 @@ class ControlPanel(QWidget):
         cutoff_validator.setNotation(QDoubleValidator.StandardNotation)
         color_validator = QDoubleValidator(-1000.0, 1000.0, 3, self)
         color_validator.setNotation(QDoubleValidator.StandardNotation)
+        positive_validator = QDoubleValidator(0.001, 1000000.0, 3, self)
+        positive_validator.setNotation(QDoubleValidator.StandardNotation)
 
         self.point_start_edit.setValidator(point_validator)
         self.point_end_edit.setValidator(point_validator)
@@ -153,66 +174,99 @@ class ControlPanel(QWidget):
         self.high_cut_edit.setValidator(cutoff_validator)
         self.vmin_edit.setValidator(color_validator)
         self.vmax_edit.setValidator(color_validator)
+        self.fk_spacing_edit.setValidator(positive_validator)
+        self.fk_vmin_edit.setValidator(positive_validator)
+        self.fk_vmax_edit.setValidator(positive_validator)
 
-        for button in [*self.action_buttons, self.browse_export_button, self.export_button]:
+        for button in [
+            *self.action_buttons,
+            self.play_waveform_button,
+            *self.denoise_buttons,
+            self.browse_export_button,
+            self.export_button,
+        ]:
             button.setFont(ui_font)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         for button in self.action_buttons:
-            button.setMinimumWidth(120)
+            button.setMinimumWidth(105)
+        self.play_waveform_button.setMinimumWidth(90)
 
-        point_group = QGroupBox("Display Range")
-        point_group.setFont(ui_font)
-        point_form = QFormLayout(point_group)
-        point_form.setContentsMargins(8, 8, 8, 8)
-        point_form.setHorizontalSpacing(10)
-        point_form.setVerticalSpacing(8)
-        point_form.addRow(QLabel("Point Range"), self._build_labeled_pair_row(
+        main_group = QGroupBox("Tab1 Parameters")
+        main_group.setFont(ui_font)
+        main_layout = QGridLayout(main_group)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setHorizontalSpacing(8)
+        main_layout.setVerticalSpacing(4)
+
+        point_range_row = self._build_labeled_pair_row(
             "Point Start",
             self.point_start_edit,
             "Point End",
             self.point_end_edit,
-        ))
-        point_form.addRow(QLabel("Color Range"), self._build_labeled_pair_row(
+        )
+        color_range_row = self._build_labeled_pair_row(
             "VMin",
             self.vmin_edit,
             "VMax",
             self.vmax_edit,
-        ))
-        point_form.addRow(QLabel("Colormap"), self.colormap_combo)
+        )
+        display_row = self._build_multi_widget_row(
+            ("Point Range", point_range_row, 3),
+            ("Color Range", color_range_row, 2),
+            ("Colormap", self.colormap_combo, 2),
+        )
 
         controls_row_widget = QWidget()
         controls_row_layout = QHBoxLayout(controls_row_widget)
         controls_row_layout.setContentsMargins(0, 0, 0, 0)
-        controls_row_layout.setSpacing(8)
+        controls_row_layout.setSpacing(6)
         for button in self.action_buttons:
             controls_row_layout.addWidget(button, 1)
-        controls_row_layout.addSpacing(8)
-        controls_row_layout.addWidget(self.waveform_point_label)
-        controls_row_layout.addWidget(self.waveform_point_edit)
-        point_form.addRow(QLabel("Actions"), controls_row_widget)
 
-        filter_group = QGroupBox("Filter")
-        filter_group.setFont(ui_font)
-        filter_form = QFormLayout(filter_group)
-        filter_form.setContentsMargins(8, 8, 8, 8)
-        filter_form.setHorizontalSpacing(10)
-        filter_form.setVerticalSpacing(8)
-        filter_form.addRow(QLabel("Type"), self.filter_type_combo)
-        filter_form.addRow(QLabel("Cutoff (Hz)"), self._build_labeled_pair_row(
+        waveform_row_widget = QWidget()
+        waveform_row_layout = QHBoxLayout(waveform_row_widget)
+        waveform_row_layout.setContentsMargins(0, 0, 0, 0)
+        waveform_row_layout.setSpacing(6)
+        waveform_row_layout.addWidget(self.waveform_point_label)
+        waveform_row_layout.addWidget(self.waveform_point_edit)
+        waveform_row_layout.addWidget(self.play_waveform_button)
+        waveform_row_layout.addStretch(1)
+
+        filter_row = self._build_multi_widget_row(
+            ("Type", self.filter_type_combo, 2),
+            ("Cutoff (Hz)", self._build_labeled_pair_row(
             "Low Cut",
             self.low_cut_edit,
             "High Cut",
             self.high_cut_edit,
-        ))
+            ), 3),
+        )
 
-        export_group = QGroupBox("Export")
-        export_group.setFont(ui_font)
-        export_layout = QVBoxLayout(export_group)
-        export_layout.setContentsMargins(8, 8, 8, 8)
-        export_layout.setSpacing(8)
+        denoise_buttons_row = QWidget()
+        denoise_buttons_layout = QGridLayout(denoise_buttons_row)
+        denoise_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        denoise_buttons_layout.setHorizontalSpacing(6)
+        denoise_buttons_layout.setVerticalSpacing(4)
+        denoise_buttons_layout.addWidget(self.spike_button, 0, 0)
+        denoise_buttons_layout.addWidget(self.common_button, 0, 1)
+        denoise_buttons_layout.addWidget(self.random_button, 1, 0)
+        denoise_buttons_layout.addWidget(self.fk_filter_button, 1, 1)
+        denoise_param_row = self._build_triple_input_row(
+            "DX(m)",
+            self.fk_spacing_edit,
+            "VMin",
+            self.fk_vmin_edit,
+            "VMax",
+            self.fk_vmax_edit,
+        )
+
+        export_widget = QWidget()
+        export_layout = QVBoxLayout(export_widget)
+        export_layout.setContentsMargins(0, 0, 0, 0)
+        export_layout.setSpacing(4)
         export_path_row = QHBoxLayout()
-        export_path_row.setSpacing(8)
+        export_path_row.setSpacing(6)
         export_path_row.addWidget(self.export_path_edit, 1)
         export_path_row.addWidget(self.browse_export_button)
         export_path_row.addWidget(self.export_button)
@@ -225,30 +279,48 @@ class ControlPanel(QWidget):
         export_option_row.addStretch(1)
         export_layout.addLayout(export_option_row)
 
-        right_column = QVBoxLayout()
-        right_column.setContentsMargins(0, 0, 0, 0)
-        right_column.setSpacing(8)
-        right_column.addWidget(filter_group)
-        right_column.addWidget(export_group)
+        for button in [*self.action_buttons, *self.denoise_buttons, self.play_waveform_button]:
+            button.setMinimumHeight(24)
+            button.setMaximumHeight(28)
+        for edit in [
+            self.point_start_edit,
+            self.point_end_edit,
+            self.vmin_edit,
+            self.vmax_edit,
+            self.low_cut_edit,
+            self.high_cut_edit,
+            self.fk_spacing_edit,
+            self.fk_vmin_edit,
+            self.fk_vmax_edit,
+            self.waveform_point_edit,
+        ]:
+            edit.setMaximumHeight(24)
+            edit.setFont(compact_font)
 
-        top_layout = QGridLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setHorizontalSpacing(10)
-        top_layout.setVerticalSpacing(8)
-        top_layout.addWidget(point_group, 0, 0)
-        top_layout.addLayout(right_column, 0, 1)
-        top_layout.setColumnStretch(0, 2)
-        top_layout.setColumnStretch(1, 1)
+        main_layout.addWidget(display_row, 0, 0, 1, 2)
+        main_layout.addWidget(controls_row_widget, 1, 0, 1, 2)
+        main_layout.addWidget(filter_row, 2, 0)
+        main_layout.addWidget(waveform_row_widget, 2, 1)
+        main_layout.addWidget(denoise_buttons_row, 0, 2, 2, 1)
+        main_layout.addWidget(denoise_param_row, 2, 2)
+        main_layout.addWidget(export_widget, 3, 0, 1, 3)
+        main_layout.setColumnStretch(0, 2)
+        main_layout.setColumnStretch(1, 2)
+        main_layout.setColumnStretch(2, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        layout.addLayout(top_layout)
+        layout.setSpacing(0)
+        layout.addWidget(main_group)
 
         self.browse_export_button.clicked.connect(self._choose_export_directory)
 
     def set_waveform_point_bounds(self, minimum: int, maximum: int) -> None:
         self.waveform_point_edit.set_bounds(minimum, maximum)
+
+    def set_denoise_buttons_enabled(self, enabled: bool) -> None:
+        for button in self.denoise_buttons:
+            button.setEnabled(enabled)
 
     def _build_labeled_pair_row(
         self,
@@ -272,6 +344,44 @@ class ControlPanel(QWidget):
         row_layout.addSpacing(6)
         row_layout.addWidget(right_label)
         row_layout.addWidget(right_widget, 1)
+        return row_widget
+
+    def _build_triple_input_row(
+        self,
+        first_label_text: str,
+        first_widget: QWidget,
+        second_label_text: str,
+        second_widget: QWidget,
+        third_label_text: str,
+        third_widget: QWidget,
+    ) -> QWidget:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        for label_text, widget in [
+            (first_label_text, first_widget),
+            (second_label_text, second_widget),
+            (third_label_text, third_widget),
+        ]:
+            label = QLabel(label_text)
+            label.setFont(widget.font())
+            row_layout.addWidget(label)
+            row_layout.addWidget(widget, 1)
+        return row_widget
+
+    def _build_multi_widget_row(self, *items: tuple[str, QWidget, int]) -> QWidget:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        for label_text, widget, stretch in items:
+            label = QLabel(label_text)
+            label.setFont(widget.font())
+            row_layout.addWidget(label)
+            row_layout.addWidget(widget, stretch)
         return row_widget
 
     def _choose_export_directory(self) -> None:
