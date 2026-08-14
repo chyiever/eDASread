@@ -110,6 +110,7 @@ class ChannelAnalysisView(QWidget):
         self.psd_plot.setLabel("bottom", "Frequency", units="Hz")
         self.psd_plot.setTitle("功率谱密度", color=AXIS_TEXT_COLOR)
         self._style_plot(self.psd_plot, axis_font, label_font)
+        self.psd_plot.setLogMode(x=True)
         self.psd_plot.getViewBox().setMouseEnabled(x=True, y=True)
         self.psd_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.psd_legend = self.psd_plot.addLegend(offset=(10, 10))

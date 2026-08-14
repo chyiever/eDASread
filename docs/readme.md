@@ -15,22 +15,23 @@
 
 ## 2. 运行环境
 
-推荐依赖：
+推荐依赖（完整清单见项目根目录 `requirements.txt`）：
 
 ```bash
-pip install pyqt5 pyqtgraph numpy scipy
+pip install -r requirements.txt
 ```
+
+核心运行时依赖：`PyQt5`、`pyqtgraph`、`numpy`、`scipy`；可选 `python-zstandard`（`.bz/.bzs` 压缩格式，缺失时尝试加载 `zstd.dll`）。
 
 启动方式（项目根目录）：
 
 ```bash
-python -m scripts.app
+python run.py
 ```
 
-打包单文件 exe：
+打包单文件 exe（项目根目录，exe 名自动包含打包日期，完成后自动清理 `build/` 等临时文件）：
 
 ```bash
-cd scripts
 python build_exe.py
 ```
 
@@ -110,6 +111,6 @@ python build_exe.py
 
 ## 9. 相关文档
 
-- 开发文档：`docs/dev.md`
+- 开发文档：`docs/dev_log.md`
 - 用户手册源：`docs/eDAS_user_manual_source.txt`
 - 用户手册（可用 Word 打开）：`docs/eDAS_user_manual.doc`

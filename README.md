@@ -1,11 +1,12 @@
 # eDASread
 
-`eDASread` 是一个面向 `.bin` 格式 eDAS 数据的桌面程序，提供文件浏览、时空图显示、指定点时域波形联动、滤波处理和当前视图导出功能。
+`eDASread` 是一个面向 `.bin` / `.bz` / `.bzs` 格式 eDAS 数据的桌面程序，提供文件浏览、时空图显示、指定点时域波形联动、滤波预处理、f-k 分析与当前视图导出功能。
 
 ## 主要功能
 
-- 扫描并分页浏览目录中的 `.bin` 文件
+- 扫描并分页浏览目录中的 `.bin` / `.bz` / `.bzs` 文件
 - 从文件名解析采样率、点数和时间戳
+- 支持 `.bin -> .bz` 批量压缩
 - 显示 time-space 图与指定位置点时域波形
 - 支持低通、高通、带通滤波
 - 支持 Tab1 交互式数据预处理：去尖峰噪声、去共模噪声、去随机噪声、FK 滤波
@@ -63,28 +64,39 @@ Tab2 和 Tab3 的绘图区支持鼠标滚轮缩放、拖动平移和框选放大
 ## 目录说明
 
 - `scripts/`：主程序与界面、渲染、处理逻辑
+- `assets/`：程序图标等静态资源
 - `docs/`：用户手册与开发文档
 - `singledataread/`：单文件读取与示例 Notebook
 - `bin2segy/`：bin 数据转 segy 的相关脚本
+- `run.py`：项目根目录启动入口
+- `build_exe.py`：根目录打包脚本（输出到 `dist/`）
+- `requirements.txt`：运行时依赖清单
 
 ## 运行环境
 
-推荐依赖：
+推荐依赖（完整清单见 `requirements.txt`）：
 
 ```bash
-pip install pyqt5 pyqtgraph numpy scipy
+pip install -r requirements.txt
 ```
 
-启动方式：
+核心运行时依赖：
+
+- `PyQt5`：界面框架
+- `pyqtgraph`：绘图
+- `numpy`：数值计算
+- `scipy`：信号滤波与频谱分析
+- `python-zstandard`：可选，`.bz/.bzs` 压缩格式支持（缺失时尝试加载 `zstd.dll`）
+
+启动方式（项目根目录）：
 
 ```bash
-python -m scripts.app
+python run.py
 ```
 
-打包单文件 EXE：
+打包单文件 EXE（项目根目录，exe 名自动包含打包日期，构建完成后自动清理 `build/` 等临时文件）：
 
 ```bash
-cd scripts
 python build_exe.py
 ```
 
@@ -99,4 +111,4 @@ python build_exe.py
 
 - 使用说明见 `docs/eDAS_user_manual.doc`
 - 文档总览见 `docs/readme.md`
-- 开发文档见 `docs/dev.md`
+- 开发文档见 `docs/dev_log.md`

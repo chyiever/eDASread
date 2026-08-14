@@ -1,0 +1,12 @@
+# eDASread 运行时依赖
+# Python 3.9+
+PyQt5>=5.15
+pyqtgraph>=0.13
+numpy>=1.21
+scipy>=1.7
+
+# 可选：.bz/.bzs 压缩格式支持（缺失时尝试加载 zstd.dll）
+python-zstandard>=0.21
+
+# 打包依赖（仅打包时需要）
+pyinstaller>=5.0

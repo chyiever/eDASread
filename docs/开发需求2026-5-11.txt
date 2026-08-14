@@ -1,0 +1,9 @@
+调整布局：
+1. Point start, point end 两个参数调整为1行（参数输入范围0~100000）；vmin、vmax两个参数调整为1行（参数输入范围-1000~1000，3位小数）。 low cut , high cut两个参数调整为1行（参数输入范围0~100000）。字号字体保持不变。
+2. save filtered data 勾选框右侧添加一个save as txt 勾选框。
+3. 注意，同一行上的相邻参数框、输入框、标签等控件保持一定的水平间距，不要挤在一起。
+
+添加功能：
+如果勾选save as txt，则导出为txt文件，导出的文件名与原文件名格式相同，只是后缀不同，文件名中的时间为导出数据的起始采样时间，每列代表一个位置点的信号，导出后的txt内数据单位为rad。相关逻辑可参考"E:\codes\eDASread\singledataread\bin_to_txt_demo.ipynb"、phase_bin_tools.py，但是需要在scripts文件夹中重新开发源码，不要直接引用singledataread文件夹中的临时程序。
+
+完成上述开发后，上传当前版本的源码（data、dist等除外）至github的dev分支，同时更新dev文档，记录源码更新内容，github分支的最新状态等。
