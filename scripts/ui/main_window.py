@@ -79,6 +79,9 @@ class MainWindow(QMainWindow):
             border: 1px solid #224f82;
             border-radius: 4px;
             padding: 5px 12px;
+            font-family: "Microsoft YaHei", "SimSun";
+            font-size: 13px;
+            font-weight: 600;
         }
         QPushButton:hover {
             background-color: #3a7dcb;
@@ -98,9 +101,9 @@ class MainWindow(QMainWindow):
         QTabBar::tab {
             background: #eef1f5;
             border: 1px solid #c4ccd6;
-            padding: 7px 18px;
+            padding: 8px 20px;
             font-family: "Microsoft YaHei", "SimSun";
-            font-size: 14px;
+            font-size: 16px;
             font-weight: 600;
             color: #1f2937;
         }
@@ -108,7 +111,7 @@ class MainWindow(QMainWindow):
             background: #2f6db2;
             color: white;
             border-color: #224f82;
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 700;
         }
         QTabBar::tab:hover:!selected {
@@ -1397,7 +1400,7 @@ class MainWindow(QMainWindow):
     def _resolve_logo_path(self) -> Optional[Path]:
         candidates = [
             asset_path("eDASread_logo.png"),
-            Path(__file__).resolve().parents[1] / "eDASread_logo.png",
+            Path(__file__).resolve().parents[2] / "assets" / "eDASread_logo.png",
         ]
         for candidate in candidates:
             if candidate.exists():

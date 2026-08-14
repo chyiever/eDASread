@@ -22,7 +22,7 @@ from scripts.ui.main_window import MainWindow
 def _resolve_logo_path() -> Path | None:
     candidates = [
         asset_path("eDASread_logo.png"),
-        CURRENT_FILE.parent / "eDASread_logo.png",
+        PROJECT_ROOT / "assets" / "eDASread_logo.png",
     ]
     for candidate in candidates:
         if candidate.exists():

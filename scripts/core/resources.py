@@ -15,4 +15,4 @@ def app_base_dir() -> Path:
 
 def asset_path(*parts: str) -> Path:
     """Return an absolute path inside the packaged assets directory."""
-    return app_base_dir().joinpath("scripts", "assets", *parts)
+    return app_base_dir().joinpath("assets", *parts)
