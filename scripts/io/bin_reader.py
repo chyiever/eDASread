@@ -200,6 +200,24 @@ def read_bin_memmap(metadata: FileMetadata) -> np.ndarray:
     )
 
 
+def read_phase_radians(metadata: FileMetadata) -> np.ndarray:
+    """Read phase data already converted to float32 radians.
+
+    For bz files the int32 full-size array is never materialized: each packet is
+    converted to radians before being written into the destination, halving peak
+    memory and saving one full pass over the data. Raw bin files stay lazy via
+    memmap and are converted to radians in a single vectorized pass.
+    """
+    if is_bz_path(metadata.file_path):
+        return read_bz_file(
+            metadata.file_path,
+            converter=lambda packet: np.asarray(packet, dtype=np.float32) * PHASE_RAD_SCALE,
+        )
+
+    raw = read_bin_memmap(metadata)
+    return convert_raw_to_radians(raw)
+
+
 def convert_radians_to_raw(phase_data: np.ndarray) -> np.ndarray:
     """Convert phase radians back to int32 raw values for bin export."""
     raw = np.rint(np.asarray(phase_data, dtype=np.float32) / PHASE_RAD_SCALE)

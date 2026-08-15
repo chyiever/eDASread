@@ -469,3 +469,60 @@ python -m py_compile scripts\processing\denoise_pipeline.py scripts\render\plot_
 ```
 
 - Qt 构造检查通过：右侧 Tab 数量为 3。
+
+### 2026-08-15 大文件读取/滤波/绘图性能优化
+
+#### 背景
+
+面对数百 MB 的 `.bz/.bin` 数据文件，原先的链路存在三处瓶颈：
+
+1. `.bz` 读取必须先解压出完整的 `int32` 数组再转 `rad`，峰值内存翻倍。
+2. Bitshuffle 逆变换按块 Python 循环，单文件耗时明显。
+3. 绘图总是把可视窗口的完整矩阵上传到 GPU，缩放时大范围视图（几百万列）卡顿明显。
+
+本次优化原则：**只降低显示层分辨率，绝不降低数据采样率、不丢失数据完整性**。所有降采样均为"显示信封"（min/max 或 peak 包络），底层 `current_data` 全分辨率数组不变。
+
+#### 代码变更
+
+- `scripts/io/bz_codec.py`：
+  - `shuffle_int32` / `unshuffle_int32` 重写为分块向量化 NumPy 实现，块大小默认 `65536`，每次向量化处理 `1 << 20` 个采样点（`_VECTOR_CHUNK_ITEMS`，为块大小的整数倍，保持块内位平面主序不变）；文件末尾不完整块沿用标量路径。输出与原逐块实现逐字节一致。
+  - 修正向量化 `unshuffle_int32` 中 `np.packbits` 缺失 `bitorder="little"` 的问题（默认 `"big"` 会导致位序错误，已用逐块参考实现做往返 + 逐字节比对验证）。
+  - `scan_bz_file` 增加 LRU 扫描缓存 `_SCAN_CACHE`（上限 `_SCAN_CACHE_MAX = 32`，key 为 `(路径, st_size, st_mtime_ns)`），避免每次读取重复解析文件头与 packet 索引。
+  - `read_bz_file(path, converter=None)`：传入 converter 时逐 packet 将 `int32` 直接转换为 `float32 rad` 写入目标数组，完整的 `int32` 大数组永不物化，峰值内存减半。
+- `scripts/io/bin_reader.py`：
+  - 新增 `read_phase_radians(metadata)`：`.bz` 走 converter 直接产出 `float32 rad`；`.bin` 走 memmap + 一次向量化 `raw -> rad`。
+- `scripts/ui/main_window.py`：
+  - `_load_file_data` 改用 `read_phase_radians(metadata)`；`_render_current_data` 把 `frame_data`（全分辨率 `frames x points`）直接传给 `space_time_view.set_data`，移除中间 `prepare_image_matrix` 拷贝。
+- `scripts/processing/denoise.py`：
+  - `common_mode_noise_removal` 向量化：`xc = np.sum(data * common[None, :], axis=1)` 一次算完全部通道的投影系数，去掉逐通道 Python 循环。
+- `scripts/processing/fdct.py`、`denoise_pipeline.py`：
+  - 引入 `_FFT_WORKERS = os.cpu_count() or 1`，`denoise_pipeline.py` 的 `numpy.fft` 全部换成 `scipy.fft` 并给 `fft2 / ifft2 / rfft2` 传 `workers`，多核并行加速 f-k 滤波与谱计算。
+- `scripts/processing/view_data.py`：
+  - 新增 `MAX_IMAGE_DISPLAY_COLUMNS = 16384`、`downsample_image_for_display(image, max_columns)`（按块取 min/max，每块输出两列，返回 `(display, samples_per_col)`，保证全局极值不丢失）。
+  - 新增 `robust_median` / `robust_abs_percentile`：对超长序列用步进子集估计，仅用于显示缩放。
+- `scripts/render/space_time_view.py`：
+  - LOD 渲染：`set_data` 保存 `frame_data`，`sigRangeChanged` 触发 60ms 单发 QTimer，延迟重切可见帧切片并按 `MAX_IMAGE_DISPLAY_COLUMNS` 降采样后上传；图像 transform 用 `samples_per_col / sample_rate` 缩放，保证坐标精确。
+  - 时域波形曲线启用 `setDownsampling(auto=True, method="peak")` + `setClipToView(True)`（只影响显示点数，保留每 bin 的 min/max 包络）。
+- `scripts/render/analysis_views.py`：
+  - Tab2 通道曲线同样启用 peak 降采样；基线中位数与幅值分布改用 `robust_median` / `robust_abs_percentile`。
+
+#### 验证记录
+
+- 语法检查全部通过（见下），共 9 个文件：
+
+```powershell
+python -m py_compile scripts\io\bz_codec.py scripts\io\bin_reader.py scripts\ui\main_window.py scripts\processing\denoise.py scripts\processing\fdct.py scripts\processing\denoise_pipeline.py scripts\processing\view_data.py scripts\render\space_time_view.py scripts\render\analysis_views.py
+```
+
+- 数值验证（临时脚本）：
+  - Bitshuffle：`shuffle -> unshuffle` 往返（含整块、跨 chunk 边界、末尾不完整块），并与逐块参考实现逐字节一致。
+  - `bz 压缩 -> read_phase_radians`：输出 `float32 rad`，与 `raw * (pi/32767)` 逐点一致。
+  - `common_mode_noise_removal` 向量化版本与逐通道循环版本数值一致。
+  - `downsample_image_for_display` 的全局 min/max 与原始矩阵一致（极值不丢失）。
+  - `robust_median` 与全量中位数接近。
+
+#### 注意事项
+
+- 位序约定：Bitshuffle 输出为"块内位平面主序"，`unpackbits`/`packbits` 必须使用 `bitorder="little"`，否则解出的 `int32` 字节序错误。
+- 显示降采样不影响导出：`Export Current View` 仍按可视窗口直接切全分辨率数据。
+- 更详细的可读/滤波/绘图策略见 `docs/eDAS快速读取-处理-绘图策略总结.md`。

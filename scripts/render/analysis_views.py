@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 from scipy import signal
 
 from scripts.core.models import FileMetadata
+from scripts.processing.view_data import robust_abs_percentile, robust_median
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.space_time_view import COLOR_MAPS
 from scripts.render.time_axis import TimeAxisItem
@@ -158,18 +159,23 @@ class ChannelAnalysisView(QWidget):
             if channel < 1 or channel > matrix.shape[1]:
                 raise ValueError(f"通道 {channel} 超出有效范围 1-{matrix.shape[1]}。")
             trace = np.asarray(matrix[:, channel - 1], dtype=np.float32)
-            traces.append(trace - np.nanmedian(trace))
+            traces.append(trace - robust_median(trace))
 
         offset_step = self._resolve_offset_step(traces)
         for index, (channel, trace) in enumerate(zip(channel_list, traces)):
             color = CURVE_COLORS[index % len(CURVE_COLORS)]
             pen = pg.mkPen(color=color, width=1.6)
-            self.time_plot.plot(
+            curve = self.time_plot.plot(
                 x_values,
                 trace + offset_step * index,
                 pen=pen,
                 name=f"Ch {channel}",
             )
+            # Display-level decimation only: 'peak' keeps min/max envelopes so no
+            # extreme sample is dropped, while GPU upload stays small for very long
+            # traces. The stored data array is untouched.
+            curve.setDownsampling(auto=True, method="peak")
+            curve.setClipToView(True)
             freq_hz, psd_db = self._compute_psd(
                 trace,
                 metadata.sample_rate_hz,
@@ -218,7 +224,7 @@ class ChannelAnalysisView(QWidget):
     def _resolve_offset_step(self, traces: list[np.ndarray]) -> float:
         robust_ranges = []
         for trace in traces:
-            spread = float(np.nanpercentile(np.abs(trace), 95.0))
+            spread = robust_abs_percentile(trace, 95.0)
             if np.isfinite(spread) and spread > 0:
                 robust_ranges.append(spread)
         if not robust_ranges:

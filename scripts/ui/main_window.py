@@ -47,11 +47,11 @@ from scripts.io.bin_reader import (
     list_raw_bin_files,
     list_bin_files,
     read_bin_memmap,
+    read_phase_radians,
 )
 from scripts.io.text_export import write_phase_txt
 from scripts.processing.denoise_pipeline import apply_denoise_step, compute_fk_spectrum_db
 from scripts.processing.filters import apply_filter
-from scripts.processing.view_data import prepare_image_matrix
 from scripts.render.analysis_views import ChannelAnalysisView, FkSpectrumView
 from scripts.render.space_time_view import SpaceTimeView
 from scripts.ui.control_panel import ControlPanel
@@ -601,8 +601,7 @@ class MainWindow(QMainWindow):
         cache_key = (str(metadata.file_path),) + filter_config.cache_key()
         processed = self.processed_cache.get(cache_key)
         if processed is None:
-            raw = read_bin_memmap(metadata)
-            phase_data = convert_raw_to_radians(raw)
+            phase_data = read_phase_radians(metadata)
             processed = apply_filter(phase_data, metadata.sample_rate_hz, filter_config)
             self.processed_cache.put(cache_key, processed, int(processed.nbytes))
 
@@ -1123,10 +1122,9 @@ class MainWindow(QMainWindow):
         waveform_point = self._read_waveform_point(start_point, end_point)
         vmin, vmax = self._read_color_range()
         colormap_name = self.control_panel.colormap_combo.currentText().strip().lower() or "seismic"
-        image_data = prepare_image_matrix(self.current_data, start_point, end_point)
         self.space_time_view.set_data(
             metadata=self.current_metadata,
-            image_data=image_data,
+            frame_data=self.current_data,
             start_point=start_point,
             end_point=end_point,
             waveform_point=waveform_point,

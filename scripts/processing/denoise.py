@@ -127,11 +127,11 @@ def common_mode_noise_removal(data, method='median'):
     if xx <= np.finfo(np.float32).eps:
         return data.T.copy()
 
-    data_dn = np.zeros((nch, nt), dtype=data.dtype)
-    for i in range(nch):
-        xc = np.sum(common * data[i])
-        data_dn[i] = data[i] - xc / xx * common
-
+    # Vectorized projection of every channel onto the common-mode signal:
+    # xc = sum(common * data[i]) for all channels at once, avoiding a Python
+    # loop over thousands of channels.
+    xc = np.sum(data * common[None, :], axis=1)
+    data_dn = data - (xc / xx)[:, None] * common[None, :]
     return data_dn.T
 
 

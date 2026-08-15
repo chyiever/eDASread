@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Literal
 
 import numpy as np
-from numpy.fft import fft2, fftfreq, fftshift, ifft2, rfft2, rfftfreq
+from scipy.fft import fft2, fftfreq, fftshift, ifft2, rfft2, rfftfreq
 from scipy.signal.windows import tukey
 
 from scripts.processing.denoise import (
@@ -14,6 +15,9 @@ from scripts.processing.denoise import (
     curvelet_denoising,
     spike_removal,
 )
+
+
+_FFT_WORKERS = os.cpu_count() or 1
 
 
 DenoiseStep = Literal["spike", "common", "random", "fk"]
@@ -108,12 +112,12 @@ def fk_filter_high_velocity(
         gather *= tukey(nt, temporal_taper).astype(np.float32)[None, :]
 
     nfft = (_next_power_of_two(nch), _next_power_of_two(nt))
-    spectrum = fft2(gather, s=nfft)
+    spectrum = fft2(gather, s=nfft, workers=_FFT_WORKERS)
     k = fftfreq(nfft[0], d=channel_spacing_m)[:, None]
     f = fftfreq(nfft[1], d=1.0 / sample_rate_hz)[None, :]
     mask = _high_velocity_mask(f, k, vmin, vmax)
 
-    filtered = ifft2(spectrum * mask).real[:nch, :nt]
+    filtered = ifft2(spectrum * mask, workers=_FFT_WORKERS).real[:nch, :nt]
     return np.asarray(filtered.T, dtype=np.float32)
 
 
@@ -142,7 +146,7 @@ def compute_fk_spectrum_db(
         _resolve_nfft(nfft_channels, nch, "FK spatial NFFT"),
         _resolve_nfft(nfft_samples, nt, "FK temporal NFFT"),
     )
-    spectrum = fftshift(rfft2(gather, s=nfft), axes=0)
+    spectrum = fftshift(rfft2(gather, s=nfft, workers=_FFT_WORKERS), axes=0)
     frequency_hz = rfftfreq(nfft[1], d=1.0 / sample_rate_hz)
     wavenumber_cpm = fftshift(fftfreq(nfft[0], d=channel_spacing_m))
 

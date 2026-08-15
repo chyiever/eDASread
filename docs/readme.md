@@ -112,5 +112,6 @@ python build_exe.py
 ## 9. 相关文档
 
 - 开发文档：`docs/dev_log.md`
+- 大文件读取/处理/绘图策略：`docs/eDAS快速读取-处理-绘图策略总结.md`
 - 用户手册源：`docs/eDAS_user_manual_source.txt`
 - 用户手册（可用 Word 打开）：`docs/eDAS_user_manual.doc`

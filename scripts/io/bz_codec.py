@@ -26,6 +26,17 @@ DEFAULT_BLOCK_VALUES = 65_536
 DEFAULT_ZSTD_LEVEL = 3
 BZ_SUFFIXES = {".bz", ".bzs"}
 
+# Vectorized bitshuffle processes this many samples per numpy chunk. It is a
+# multiple of DEFAULT_BLOCK_VALUES so block boundaries always align, keeping
+# output byte-identical to the reference per-block implementation while
+# bounding peak memory to roughly 32 MB of unpacked bits per chunk.
+_VECTOR_CHUNK_ITEMS = 1 << 20
+
+# Small LRU cache for bz packet-header scans keyed by (path, size, mtime_ns).
+# Avoids re-scanning a huge file header twice (inspect + read) within one load.
+_SCAN_CACHE: dict[tuple, "BzFileInfo"] = {}
+_SCAN_CACHE_MAX = 32
+
 FILE_HEADER_STRUCT = struct.Struct("<4sHHQIIIIIIIiI")
 PACKET_HEADER_STRUCT = struct.Struct("<4sHHQQIIIHHIiQQQQII")
 
@@ -133,9 +144,27 @@ class NumpyBitshuffleBackend:
     def shuffle_int32(self, array: np.ndarray, block_values: int) -> bytes:
         """Bit-plane shuffle an int32 array and return bytes."""
         flat = np.asarray(array, dtype=np.int32).reshape(-1)
+        block_values = int(block_values)
+        if block_values <= 0:
+            raise ValueError("bitshuffle block_values must be positive.")
+
         out = bytearray()
-        for start in range(0, flat.size, block_values):
-            block = np.ascontiguousarray(flat[start : start + block_values])
+        full_blocks = flat.size // block_values
+        rem = flat.size % block_values
+        chunk_blocks = max(1, _VECTOR_CHUNK_ITEMS // block_values)
+        for block_start in range(0, full_blocks, chunk_blocks):
+            nb = min(chunk_blocks, full_blocks - block_start)
+            start = block_start * block_values
+            block = np.ascontiguousarray(flat[start : start + nb * block_values])
+            as_bytes = block.view(np.uint8).reshape(
+                nb, block_values, BYTES_PER_SAMPLE
+            )
+            bits = np.unpackbits(as_bytes, axis=2, bitorder="little")
+            out.extend(
+                np.packbits(bits.transpose(0, 2, 1).reshape(-1), bitorder="little").tobytes()
+            )
+        if rem:
+            block = np.ascontiguousarray(flat[full_blocks * block_values :])
             as_bytes = block.view(np.uint8).reshape(-1, BYTES_PER_SAMPLE)
             bits = np.unpackbits(as_bytes, axis=1, bitorder="little")
             out.extend(np.packbits(bits.T.reshape(-1), bitorder="little").tobytes())
@@ -151,20 +180,37 @@ class NumpyBitshuffleBackend:
         expected_bytes = int(item_count) * BYTES_PER_SAMPLE
         if len(payload) != expected_bytes:
             raise ValueError(f"bad bitshuffle payload size: {len(payload)} != {expected_bytes}")
+        item_count = int(item_count)
+        block_values = int(block_values)
+        if block_values <= 0:
+            raise ValueError("bitshuffle block_values must be positive.")
 
         source = np.frombuffer(payload, dtype=np.uint8)
-        out = np.empty(int(item_count), dtype=np.int32)
-        byte_pos = 0
-        item_pos = 0
-        for count in iter_block_counts(int(item_count), int(block_values)):
-            byte_count = count * BYTES_PER_SAMPLE
-            block_bytes = source[byte_pos : byte_pos + byte_count]
-            bits = np.unpackbits(block_bytes, bitorder="little")[: count * 32]
-            restored_bits = bits.reshape(32, count).T
+        out = np.empty(item_count, dtype=np.int32)
+        full_blocks = item_count // block_values
+        rem = item_count % block_values
+        chunk_blocks = max(1, _VECTOR_CHUNK_ITEMS // block_values)
+        for block_start in range(0, full_blocks, chunk_blocks):
+            nb = min(chunk_blocks, full_blocks - block_start)
+            byte_start = block_start * block_values * BYTES_PER_SAMPLE
+            byte_count = nb * block_values * BYTES_PER_SAMPLE
+            chunk_bytes = source[byte_start : byte_start + byte_count]
+            bits = np.unpackbits(chunk_bytes, bitorder="little")
+            planes = bits.reshape(nb, 32, block_values)
+            restored = planes.transpose(0, 2, 1).reshape(nb * block_values, 32)
+            start = block_start * block_values
+            out[start : start + nb * block_values] = (
+                np.packbits(restored, axis=1, bitorder="little").reshape(-1).view(np.int32)
+            )
+        if rem:
+            byte_start = full_blocks * block_values * BYTES_PER_SAMPLE
+            block_bytes = source[byte_start : byte_start + rem * BYTES_PER_SAMPLE]
+            bits = np.unpackbits(block_bytes, bitorder="little")[: rem * 32]
+            restored_bits = bits.reshape(32, rem).T
             restored_bytes = np.packbits(restored_bits, axis=1, bitorder="little")
-            out[item_pos : item_pos + count] = restored_bytes.reshape(-1).view(np.int32)
-            byte_pos += byte_count
-            item_pos += count
+            out[full_blocks * block_values :] = (
+                restored_bytes.reshape(-1).view(np.int32)
+            )
         return out
 
 
@@ -575,6 +621,12 @@ def _position_at_first_packet(file) -> BzFileHeader | None:
     raise ValueError(f"unrecognized bz magic: {magic!r}")
 
 
+def _scan_cache_key(file_path: Path) -> tuple:
+    """Return a cache key identifying a specific file version."""
+    stat = file_path.stat()
+    return (str(file_path), stat.st_size, stat.st_mtime_ns)
+
+
 def scan_bz_file(path: str | Path) -> BzFileInfo:
     """Scan packet headers and return whole-file metadata without decompression."""
     file_path = Path(path)
@@ -582,6 +634,11 @@ def scan_bz_file(path: str | Path) -> BzFileInfo:
         raise FileNotFoundError(f"File not found: {file_path}")
     if not file_path.is_file():
         raise ValueError(f"Path is not a file: {file_path}")
+
+    cache_key = _scan_cache_key(file_path)
+    cached = _SCAN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     file_size = file_path.stat().st_size
     points: int | None = None
@@ -636,7 +693,7 @@ def scan_bz_file(path: str | Path) -> BzFileInfo:
     if packet_count == 0 or points is None or sample_rate_hz is None:
         raise ValueError(f"No bz packets found in {file_path}")
 
-    return BzFileInfo(
+    info = BzFileInfo(
         path=file_path,
         sample_rate_hz=sample_rate_hz,
         points=points,
@@ -647,12 +704,29 @@ def scan_bz_file(path: str | Path) -> BzFileInfo:
         first_timestamp_ns=first_timestamp_ns,
         file_header=file_header,
     )
+    if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
+        _SCAN_CACHE.pop(next(iter(_SCAN_CACHE)))
+    _SCAN_CACHE[cache_key] = info
+    return info
 
 
-def read_bz_file(path: str | Path) -> np.ndarray:
-    """Read a bz file into a contiguous frames x points int32 array."""
+def read_bz_file(
+    path: str | Path,
+    converter=None,
+) -> np.ndarray:
+    """Read a bz file into a contiguous frames x points array.
+
+    When ``converter`` is provided it is called with each decompressed int32
+    packet (a ``frames x points`` array) and must return an array of the same
+    shape. This allows, for example, converting int32 raw phase values to
+    float32 radians per packet so the full-size int32 array is never
+    materialized, reducing peak memory for large files.
+    """
     info = scan_bz_file(path)
-    data = np.empty((info.frame_count, info.points), dtype=np.int32)
+    if converter is None:
+        data = np.empty((info.frame_count, info.points), dtype=np.int32)
+    else:
+        data = np.empty((info.frame_count, info.points), dtype=np.float32)
     decompressor = BitshuffleZstdDecompressor()
 
     frame_pos = 0
@@ -667,7 +741,10 @@ def read_bz_file(path: str | Path) -> np.ndarray:
 
         packet_data = decompressor.decompress_packet(header, payload)
         frame_end = frame_pos + int(header.frames)
-        data[frame_pos:frame_end, :] = packet_data
+        if converter is None:
+            data[frame_pos:frame_end, :] = packet_data
+        else:
+            data[frame_pos:frame_end, :] = converter(packet_data)
         frame_pos = frame_end
         expected_packet_index = int(header.packet_index) + 1
 

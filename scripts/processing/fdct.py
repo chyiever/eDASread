@@ -7,13 +7,18 @@ and Technology of China), daspy/advanced_tools/fdct.py.
 Modified from CurveLab 2.1.3 (http://www.curvelet.org).
 """
 
+import os
+
 import numpy as np
 from functools import lru_cache
 from scipy.fft import fftshift, ifftshift
 from scipy.fft import fft2 as _fft2, ifft2 as _ifft2
 
 
-_FFT_WORKERS = None
+# Let pocketfft run the many small FFTs of the curvelet transform across all
+# CPU cores. Running inside a Qt worker thread is safe because scipy.fft
+# releases the GIL while computing.
+_FFT_WORKERS = os.cpu_count() or 1
 
 
 def fft2(x):

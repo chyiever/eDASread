@@ -7,11 +7,12 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QTransform
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from scripts.core.models import FileMetadata
+from scripts.processing.view_data import MAX_IMAGE_DISPLAY_COLUMNS, downsample_image_for_display
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.time_axis import TimeAxisItem
 
@@ -66,11 +67,14 @@ class SpaceTimeView(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._metadata: Optional[FileMetadata] = None
-        self._image_data: Optional[np.ndarray] = None
+        self._frame_data: Optional[np.ndarray] = None
         self._y_start_point = 1
         self._y_end_point = 1
         self._waveform_point = 1
         self._colormap_name = "jet"
+        self._vmin: Optional[float] = None
+        self._vmax: Optional[float] = None
+        self._applied_image_key: Optional[tuple] = None
         self._view_history: list[tuple[tuple[float, float], tuple[float, float]]] = []
         self._default_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._last_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
@@ -93,7 +97,13 @@ class SpaceTimeView(QWidget):
         self.plot_widget.addItem(self.image_item)
         self.plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.plot_widget.getViewBox().sigRangeChanged.connect(self._emit_view_range_changed)
+        self.plot_widget.getViewBox().sigRangeChanged.connect(self._schedule_lod_refresh)
         self.plot_widget.getViewBox().sigRangeChangedManually.connect(self._record_manual_view)
+
+        self._lod_timer = QTimer(self)
+        self._lod_timer.setSingleShot(True)
+        self._lod_timer.setInterval(60)
+        self._lod_timer.timeout.connect(self._refresh_image_lod)
 
         self.waveform_axis = TimeAxisItem(orientation="bottom")
         self.waveform_plot = pg.PlotWidget(axisItems={"bottom": self.waveform_axis})
@@ -143,7 +153,7 @@ class SpaceTimeView(QWidget):
     def set_data(
         self,
         metadata: FileMetadata,
-        image_data: np.ndarray,
+        frame_data: np.ndarray,
         start_point: int,
         end_point: int,
         waveform_point: int,
@@ -151,28 +161,27 @@ class SpaceTimeView(QWidget):
         vmax: float | None = None,
         colormap_name: str = "jet",
     ) -> None:
-        """Update the displayed image and linked waveform view."""
+        """Update the displayed image and linked waveform view.
+
+        ``frame_data`` is the full ``frames x points`` processed matrix; the
+        visible point slice is a view into it (no copy), and the image is
+        decimated on the fly for display while keeping full resolution for zoom.
+        """
         self._metadata = metadata
-        self._image_data = image_data
+        self._frame_data = frame_data
         self._y_start_point = start_point
         self._y_end_point = end_point
         self._waveform_point = waveform_point
         self._colormap_name = colormap_name
+        self._vmin = vmin
+        self._vmax = vmax
         self._view_history.clear()
         self._default_range = None
         self._last_view_range = None
 
-        levels = self._resolve_levels(image_data, vmin, vmax)
         self._apply_colormap(colormap_name)
         self.time_axis.set_reference_time(metadata.start_time)
         self.waveform_axis.set_reference_time(metadata.start_time)
-        self.image_item.setImage(image_data, autoLevels=False, levels=levels)
-        self.histogram_widget.item.setLevels(*levels)
-
-        transform = QTransform()
-        transform.scale(1.0 / metadata.sample_rate_hz, 1.0)
-        transform.translate(0.0, start_point)
-        self.image_item.setTransform(transform)
 
         self.plot_widget.setLimits(
             xMin=0.0,
@@ -181,6 +190,8 @@ class SpaceTimeView(QWidget):
             yMax=end_point + 1,
         )
         self.waveform_plot.setLimits(xMin=0.0, xMax=metadata.duration_s)
+
+        self._refresh_image(full=True)
         self._update_waveform_curve()
         self.reset_view(clear_history=True)
 
@@ -196,7 +207,7 @@ class SpaceTimeView(QWidget):
 
     def reset_view(self, clear_history: bool = False) -> None:
         """Reset the view to show the full visible image extent."""
-        if self._metadata is None or self._image_data is None:
+        if self._metadata is None or self._frame_data is None:
             return
 
         if clear_history:
@@ -263,20 +274,72 @@ class SpaceTimeView(QWidget):
         self.plot_widget.setYRange(y_min, y_max, padding=0.0)
 
     def _update_waveform_curve(self) -> None:
-        if self._metadata is None or self._image_data is None:
+        if self._metadata is None or self._frame_data is None:
             self.waveform_curve.clear()
             return
 
-        waveform_index = self._waveform_point - self._y_start_point
-        if waveform_index < 0 or waveform_index >= self._image_data.shape[0]:
+        point_index = self._y_start_point - 1 + (self._waveform_point - self._y_start_point)
+        if point_index < 0 or point_index >= self._frame_data.shape[1]:
             self.waveform_curve.clear()
             return
 
-        waveform = np.asarray(self._image_data[waveform_index], dtype=np.float32)
+        waveform = np.ascontiguousarray(self._frame_data[:, point_index], dtype=np.float32)
         x_values = np.arange(waveform.shape[0], dtype=np.float32) / self._metadata.sample_rate_hz
         self.waveform_curve.setData(x=x_values, y=waveform)
+        # Display-level downsampling only: 'peak' mode keeps the min/max envelope
+        # of every bin, so extreme values are never dropped while GPU upload stays
+        # small. The full-resolution array is unchanged.
+        self.waveform_curve.setDownsampling(auto=True, method="peak")
+        self.waveform_curve.setClipToView(True)
         self.waveform_plot.setTitle(f"指定位置点 {self._waveform_point} 时域波形")
         self._reset_waveform_y_range(waveform)
+
+    def _visible_frame_slice(self) -> slice:
+        """Return the frame slice currently visible in the space-time plot."""
+        if self._metadata is None or self._frame_data is None:
+            return slice(0, 1)
+        x_range, _ = self.current_ranges()
+        sample_rate = self._metadata.sample_rate_hz
+        frame_start = max(0, int(np.floor(x_range[0] * sample_rate)))
+        frame_end = min(self._frame_data.shape[0], int(np.ceil(x_range[1] * sample_rate)))
+        frame_end = max(frame_end, frame_start + 1)
+        return slice(frame_start, frame_end)
+
+    def _refresh_image(self, full: bool = False) -> None:
+        """(Re)slice the full-resolution data and upload a decimated image."""
+        if self._metadata is None or self._frame_data is None:
+            return
+
+        npoints = self._y_end_point - self._y_start_point + 1
+        if npoints < 1:
+            return
+
+        frame_slice = slice(0, self._frame_data.shape[0]) if full else self._visible_frame_slice()
+        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        frame0 = max(0, frame_slice.start or 0)
+
+        image_pt = self._frame_data[frame_slice, point_slice].T
+        display, samples_per_col = downsample_image_for_display(image_pt, MAX_IMAGE_DISPLAY_COLUMNS)
+
+        key = (frame0, frame_slice.stop, display.shape[1])
+        if key == self._applied_image_key:
+            return
+
+        levels = self._resolve_levels(display, self._vmin, self._vmax)
+        self.image_item.setImage(display, autoLevels=False, levels=levels)
+        self.histogram_widget.item.setLevels(*levels)
+
+        transform = QTransform()
+        transform.scale(samples_per_col / self._metadata.sample_rate_hz, 1.0)
+        transform.translate(frame0 / self._metadata.sample_rate_hz, self._y_start_point)
+        self.image_item.setTransform(transform)
+        self._applied_image_key = key
+
+    def _schedule_lod_refresh(self, *_args) -> None:
+        self._lod_timer.start()
+
+    def _refresh_image_lod(self) -> None:
+        self._refresh_image(full=False)
 
     def _reset_waveform_y_range(self, waveform: np.ndarray) -> None:
         if waveform.size == 0:
