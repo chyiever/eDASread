@@ -12,7 +12,11 @@ from PyQt5.QtGui import QFont, QTransform
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from scripts.core.models import FileMetadata
-from scripts.processing.view_data import MAX_IMAGE_DISPLAY_COLUMNS, downsample_image_for_display
+from scripts.processing.view_data import (
+    MAX_IMAGE_DISPLAY_COLUMNS,
+    downsample_image_for_display,
+    robust_min_max,
+)
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.time_axis import TimeAxisItem
 
@@ -75,6 +79,7 @@ class SpaceTimeView(QWidget):
         self._vmin: Optional[float] = None
         self._vmax: Optional[float] = None
         self._applied_image_key: Optional[tuple] = None
+        self._auto_levels: Optional[tuple[float, float]] = None
         self._view_history: list[tuple[tuple[float, float], tuple[float, float]]] = []
         self._default_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._last_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
@@ -102,7 +107,7 @@ class SpaceTimeView(QWidget):
 
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
-        self._lod_timer.setInterval(60)
+        self._lod_timer.setInterval(30)
         self._lod_timer.timeout.connect(self._refresh_image_lod)
 
         self.waveform_axis = TimeAxisItem(orientation="bottom")
@@ -178,6 +183,8 @@ class SpaceTimeView(QWidget):
         self._view_history.clear()
         self._default_range = None
         self._last_view_range = None
+        self._applied_image_key = None
+        self._auto_levels = self._compute_auto_levels() if (vmin is None or vmax is None) else None
 
         self._apply_colormap(colormap_name)
         self.time_axis.set_reference_time(metadata.start_time)
@@ -294,16 +301,30 @@ class SpaceTimeView(QWidget):
         self.waveform_plot.setTitle(f"指定位置点 {self._waveform_point} 时域波形")
         self._reset_waveform_y_range(waveform)
 
-    def _visible_frame_slice(self) -> slice:
-        """Return the frame slice currently visible in the space-time plot."""
+    def _frame_slice_for_view(self) -> slice:
+        """Return the frame slice to upload for the current visible window.
+
+        When the visible window is small enough to display at full resolution,
+        the slice is the visible window plus a small safety margin so that short
+        scrolls never reveal a blank area. When zoomed far out, the whole time
+        axis is returned as one coarse (downsampled) image so that horizontal
+        scrolling never reveals blank areas either.
+        """
         if self._metadata is None or self._frame_data is None:
             return slice(0, 1)
+
         x_range, _ = self.current_ranges()
         sample_rate = self._metadata.sample_rate_hz
+        frame_count = self._frame_data.shape[0]
         frame_start = max(0, int(np.floor(x_range[0] * sample_rate)))
-        frame_end = min(self._frame_data.shape[0], int(np.ceil(x_range[1] * sample_rate)))
+        frame_end = min(frame_count, int(np.ceil(x_range[1] * sample_rate)))
         frame_end = max(frame_end, frame_start + 1)
-        return slice(frame_start, frame_end)
+
+        span = frame_end - frame_start
+        if span <= MAX_IMAGE_DISPLAY_COLUMNS:
+            margin = max(1, int(round(span * 0.2)))
+            return slice(max(0, frame_start - margin), min(frame_count, frame_end + margin))
+        return slice(0, frame_count)
 
     def _refresh_image(self, full: bool = False) -> None:
         """(Re)slice the full-resolution data and upload a decimated image."""
@@ -314,29 +335,36 @@ class SpaceTimeView(QWidget):
         if npoints < 1:
             return
 
-        frame_slice = slice(0, self._frame_data.shape[0]) if full else self._visible_frame_slice()
+        frame_slice = slice(0, self._frame_data.shape[0]) if full else self._frame_slice_for_view()
         point_slice = slice(self._y_start_point - 1, self._y_end_point)
         frame0 = max(0, frame_slice.start or 0)
 
         image_pt = self._frame_data[frame_slice, point_slice].T
         display, samples_per_col = downsample_image_for_display(image_pt, MAX_IMAGE_DISPLAY_COLUMNS)
 
-        key = (frame0, frame_slice.stop, display.shape[1])
+        key = (
+            self._y_start_point,
+            self._y_end_point,
+            frame_slice.start,
+            frame_slice.stop,
+            display.shape[1],
+        )
         if key == self._applied_image_key:
             return
 
-        levels = self._resolve_levels(display, self._vmin, self._vmax)
+        levels = self._resolve_levels(image_pt, self._vmin, self._vmax)
         self.image_item.setImage(display, autoLevels=False, levels=levels)
         self.histogram_widget.item.setLevels(*levels)
 
         transform = QTransform()
-        transform.scale(samples_per_col / self._metadata.sample_rate_hz, 1.0)
         transform.translate(frame0 / self._metadata.sample_rate_hz, self._y_start_point)
+        transform.scale(samples_per_col / self._metadata.sample_rate_hz, 1.0)
         self.image_item.setTransform(transform)
         self._applied_image_key = key
 
     def _schedule_lod_refresh(self, *_args) -> None:
-        self._lod_timer.start()
+        if not self._lod_timer.isActive():
+            self._lod_timer.start()
 
     def _refresh_image_lod(self) -> None:
         self._refresh_image(full=False)
@@ -365,12 +393,49 @@ class SpaceTimeView(QWidget):
         vmax: float | None,
     ) -> tuple[float, float]:
         if vmin is None or vmax is None:
-            auto_min = float(np.nanmin(image_data))
-            auto_max = float(np.nanmax(image_data))
+            if self._auto_levels is not None:
+                auto_min, auto_max = self._auto_levels
+            else:
+                auto_min, auto_max = robust_min_max(image_data)
+            if not np.isfinite(auto_min) or not np.isfinite(auto_max):
+                return -1.0, 1.0
             if auto_min == auto_max:
                 auto_max = auto_min + 1e-6
             return auto_min, auto_max
         return vmin, vmax
+
+    def _compute_auto_levels(self) -> Optional[tuple[float, float]]:
+        """Estimate colour levels once from the full point range.
+
+        Computing the levels from the full time axis (instead of the currently
+        visible slice) keeps the colormap stable while zooming/panning, so the
+        image does not appear lighter when zoomed in and darker when zoomed out.
+        """
+        if self._metadata is None or self._frame_data is None:
+            return None
+
+        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        data = self._frame_data[:, point_slice]
+        if data.size == 0:
+            return None
+
+        max_samples = 1_000_000
+        if data.size <= max_samples:
+            auto_min = float(np.nanmin(data))
+            auto_max = float(np.nanmax(data))
+        else:
+            npoints = max(data.shape[1], 1)
+            per_point = max(1, int(max_samples // npoints))
+            step = max(1, int(np.ceil(data.shape[0] / per_point)))
+            subset = data[::step, :]
+            auto_min = float(np.nanmin(subset))
+            auto_max = float(np.nanmax(subset))
+
+        if not np.isfinite(auto_min) or not np.isfinite(auto_max):
+            return None
+        if auto_min == auto_max:
+            auto_max = auto_min + 1e-6
+        return auto_min, auto_max
 
     def _apply_colormap(self, colormap_name: str) -> None:
         color_map = COLOR_MAPS.get(colormap_name, COLOR_MAPS["jet"])

@@ -6,7 +6,7 @@ from typing import Iterable
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QRectF, pyqtSignal
+from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,74 @@ CURVE_COLORS = [
     "#56b4e9",
     "#7f7f7f",
 ]
+
+
+class TimeSelectionViewBox(pg.ViewBox):
+    """ViewBox that supports Ctrl+left-drag time-range selection.
+
+    A plain left-drag keeps the default ``RectMode`` zoom behaviour. Holding
+    ``Ctrl`` while dragging instead selects a time range (without zooming),
+    emitting ``region_dragged`` continuously and ``region_selected`` on release.
+    """
+
+    region_dragged = pyqtSignal(float, float)
+    region_selected = pyqtSignal(float, float)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._selecting = False
+        self._select_start_x: float | None = None
+        self.setMouseMode(pg.ViewBox.RectMode)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton and (ev.modifiers() & Qt.ControlModifier):
+            self._selecting = True
+            point = self.mapToView(ev.pos())
+            self._select_start_x = float(point.x())
+            self.region_dragged.emit(self._select_start_x, self._select_start_x)
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseDragEvent(self, ev, axis=None) -> None:
+        if self._selecting:
+            if ev.button() & Qt.LeftButton:
+                point = self.mapToView(ev.pos())
+                self.region_dragged.emit(self._select_start_x, float(point.x()))
+            ev.accept()
+            return
+        super().mouseDragEvent(ev, axis=axis)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._selecting:
+            self._selecting = False
+            point = self.mapToView(ev.pos())
+            x0 = min(self._select_start_x, float(point.x()))
+            x1 = max(self._select_start_x, float(point.x()))
+            if x1 - x0 > 1e-9:
+                self.region_selected.emit(x0, x1)
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+
+class FrequencyLogAxis(pg.AxisItem):
+    """Log-frequency axis with plain decimal tick labels.
+
+    pyqtgraph's default log tick formatter uses ``%0.1g`` which renders values
+    such as 20/100 as ``2·10¹`` / ``10²``. This subclass instead renders plain
+    ``20`` / ``100`` labels so the Hz scale is readable and does not crowd.
+    """
+
+    def logTickStrings(self, values, scale, spacing):
+        strings = []
+        for value in values:
+            number = float(10.0 ** value * scale)
+            if number >= 1.0 and abs(number - round(number)) < 1e-6 * max(1.0, number):
+                strings.append(str(int(round(number))))
+            else:
+                strings.append(f"{number:g}")
+        return strings
 
 
 class ChannelAnalysisView(QWidget):
@@ -96,16 +165,40 @@ class ChannelAnalysisView(QWidget):
         controls_layout.setColumnStretch(3, 1)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
-        self.time_plot = pg.PlotWidget(axisItems={"bottom": self.time_axis})
-        self.psd_plot = pg.PlotWidget()
+        self._time_view_box = TimeSelectionViewBox()
+        self.time_plot = pg.PlotWidget(axisItems={"bottom": self.time_axis}, viewBox=self._time_view_box)
+        self.psd_plot = pg.PlotWidget(axisItems={"bottom": FrequencyLogAxis(orientation="bottom")})
 
-        self.time_plot.setLabel("left", "Phase + offset", units="rad")
+        self.time_plot.setLabel("left", "Amplitude", units="rad")
         self.time_plot.setLabel("bottom", "Time")
         self.time_plot.setTitle("指定通道时域波形", color=AXIS_TEXT_COLOR)
         self._style_plot(self.time_plot, axis_font, label_font)
         self.time_plot.getViewBox().setMouseEnabled(x=True, y=True)
         self.time_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.time_legend = self.time_plot.addLegend(offset=(10, 10))
+
+        self.psd_region = pg.LinearRegionItem(
+            values=(0.0, 1.0),
+            brush=pg.mkBrush(255, 230, 60, 70),
+            pen=pg.mkPen(200, 170, 0, 150),
+            movable=False,
+        )
+        self.psd_region.setZValue(-20)
+        self.time_plot.addItem(self.psd_region)
+        self.psd_region.hide()
+        self._time_view_box.region_dragged.connect(self._on_region_dragged)
+        self._time_view_box.region_selected.connect(self._on_region_selected)
+
+        self._metadata: FileMetadata | None = None
+        self._data: np.ndarray | None = None
+        self._channels: list[int] = []
+        self._traces: list[np.ndarray] = []
+        self._offset_step = 1.0
+        self._psd_nperseg: int | None = None
+        self._psd_overlap_percent = 50.0
+        self._psd_x_range: tuple[float | None, float | None] = (None, None)
+        self._psd_y_range: tuple[float | None, float | None] = (None, None)
+        self._psd_time_range: tuple[float, float] | None = None
 
         self.psd_plot.setLabel("left", "PSD", units="dB")
         self.psd_plot.setLabel("bottom", "Frequency", units="Hz")
@@ -116,12 +209,33 @@ class ChannelAnalysisView(QWidget):
         self.psd_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.psd_legend = self.psd_plot.addLegend(offset=(10, 10))
 
+        # Log-frequency axis: label one tick per decade (10, 100, ...) and drop
+        # the crowded 1..9 minor labels so the Hz scale never overlaps.
+        self.psd_x_axis = self.psd_plot.getAxis("bottom")
+        self.psd_x_axis.setTickSpacing(major=1.0, minor=0.25)
+        self.psd_x_axis.setStyle(maxTextLevel=0)
+        # Keep the unit label as "Hz": pyqtgraph otherwise auto-prefixes the
+        # label to "kHz" once the range reaches a few kilohertz.
+        self.psd_x_axis.enableAutoSIPrefix(False)
+        self.psd_x_axis.labelUnitPrefix = ""
+
+        self._active_plot: pg.PlotWidget | None = None
+        self.time_plot.scene().sigMouseClicked.connect(self._mark_time_active)
+        self.psd_plot.scene().sigMouseClicked.connect(self._mark_psd_active)
+
+        plot_splitter = QSplitter(Qt.Vertical)
+        plot_splitter.setChildrenCollapsible(False)
+        plot_splitter.addWidget(self.time_plot)
+        plot_splitter.addWidget(self.psd_plot)
+        plot_splitter.setStretchFactor(0, 1)
+        plot_splitter.setStretchFactor(1, 1)
+        plot_splitter.setHandleWidth(8)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(controls)
-        layout.addWidget(self.time_plot, 1)
-        layout.addWidget(self.psd_plot, 1)
+        layout.addWidget(plot_splitter, 1)
 
         self.plot_button.clicked.connect(self.plot_requested)
         self.channels_edit.returnPressed.connect(self.plot_requested)
@@ -144,53 +258,180 @@ class ChannelAnalysisView(QWidget):
         if not channel_list:
             raise ValueError("请至少输入一个通道。")
 
-        self.time_plot.clear()
-        self.psd_plot.clear()
-        self.time_legend.clear()
-        self.psd_legend.clear()
-        self.time_axis.set_reference_time(metadata.start_time)
-
         matrix = np.asarray(data, dtype=np.float32)
-        frames = matrix.shape[0]
-        x_values = np.arange(frames, dtype=np.float32) / metadata.sample_rate_hz
-
-        traces = []
         for channel in channel_list:
             if channel < 1 or channel > matrix.shape[1]:
                 raise ValueError(f"通道 {channel} 超出有效范围 1-{matrix.shape[1]}。")
-            trace = np.asarray(matrix[:, channel - 1], dtype=np.float32)
-            traces.append(trace - robust_median(trace))
 
-        offset_step = self._resolve_offset_step(traces)
-        for index, (channel, trace) in enumerate(zip(channel_list, traces)):
+        self._metadata = metadata
+        self._data = matrix
+        self._channels = channel_list
+        self._psd_nperseg = psd_nperseg
+        self._psd_overlap_percent = psd_overlap_percent
+        self._psd_x_range = psd_x_range
+        self._psd_y_range = psd_y_range
+        self._psd_time_range = None
+
+        self._prepare_traces()
+        self._render_time_plot()
+        self._render_psd()
+
+    def _prepare_traces(self) -> None:
+        self._traces = []
+        for channel in self._channels:
+            trace = np.asarray(self._data[:, channel - 1], dtype=np.float32)
+            self._traces.append(trace - robust_median(trace))
+        self._offset_step = self._resolve_offset_step(self._traces)
+
+    def _render_time_plot(self) -> None:
+        self.time_plot.clear()
+        self.time_legend.clear()
+        self.time_axis.set_reference_time(self._metadata.start_time)
+
+        frames = self._data.shape[0]
+        x_values = np.arange(frames, dtype=np.float32) / self._metadata.sample_rate_hz
+
+        for index, (channel, trace) in enumerate(zip(self._channels, self._traces)):
             color = CURVE_COLORS[index % len(CURVE_COLORS)]
             pen = pg.mkPen(color=color, width=1.6)
             curve = self.time_plot.plot(
                 x_values,
-                trace + offset_step * index,
+                trace + self._offset_step * index,
                 pen=pen,
-                name=f"Ch {channel}",
+                name=f"CH {channel}",
             )
             # Display-level decimation only: 'peak' keeps min/max envelopes so no
             # extreme sample is dropped, while GPU upload stays small for very long
             # traces. The stored data array is untouched.
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
-            freq_hz, psd_db = self._compute_psd(
-                trace,
-                metadata.sample_rate_hz,
-                nperseg=psd_nperseg,
-                overlap_percent=psd_overlap_percent,
-            )
-            self.psd_plot.plot(freq_hz, psd_db, pen=pen, name=f"Ch {channel}")
 
         self.time_plot.setTitle(
-            "指定通道时域波形：" + ", ".join(str(ch) for ch in channel_list),
+            "指定通道时域波形：" + ", ".join(str(ch) for ch in self._channels),
             color=AXIS_TEXT_COLOR,
         )
+
+        # ``clear()`` also removes the selection region, so re-add it and restore
+        # its visibility (always hidden after a fresh ``set_data`` call).
+        self.time_plot.addItem(self.psd_region)
+        if self._psd_time_range is not None:
+            self.psd_region.setRegion(self._psd_time_range)
+            self.psd_region.show()
+        else:
+            self.psd_region.hide()
+
         self.time_plot.enableAutoRange()
+
+    def _render_psd(self) -> None:
+        self.psd_plot.clear()
+        self.psd_legend.clear()
+
+        for index, (channel, trace) in enumerate(zip(self._channels, self._traces)):
+            color = CURVE_COLORS[index % len(CURVE_COLORS)]
+            pen = pg.mkPen(color=color, width=1.6)
+            psd_trace = self._slice_psd_trace(trace)
+            freq_hz, psd_db = self._compute_psd(
+                psd_trace,
+                self._metadata.sample_rate_hz,
+                nperseg=self._psd_nperseg,
+                overlap_percent=self._psd_overlap_percent,
+            )
+            self.psd_plot.plot(freq_hz, psd_db, pen=pen, name=f"CH {channel}")
+
+        title = "功率谱密度"
+        if self._psd_time_range is not None:
+            title += f"（{self._psd_time_range[0]:.2f}-{self._psd_time_range[1]:.2f}s）"
+        self.psd_plot.setTitle(title, color=AXIS_TEXT_COLOR)
         self.psd_plot.enableAutoRange()
-        self._apply_psd_ranges(psd_x_range, psd_y_range)
+        self._apply_psd_ranges(self._psd_x_range, self._psd_y_range)
+
+    def _slice_psd_trace(self, trace: np.ndarray) -> np.ndarray:
+        if self._psd_time_range is None or self._metadata is None:
+            return trace
+        t0, t1 = self._psd_time_range
+        sample_rate = self._metadata.sample_rate_hz
+        index0 = max(0, int(np.floor(t0 * sample_rate)))
+        index1 = min(trace.size, int(np.ceil(t1 * sample_rate)))
+        index1 = max(index1, index0 + 1)
+        return trace[index0:index1]
+
+    def _on_region_dragged(self, x0: float, x1: float) -> None:
+        if self._data is None:
+            return
+        left = min(x0, x1)
+        right = max(x0, x1)
+        self.psd_region.setRegion((left, right))
+        self.psd_region.show()
+
+    def _on_region_selected(self, x0: float, x1: float) -> None:
+        if self._data is None:
+            return
+        self._psd_time_range = (min(x0, x1), max(x0, x1))
+        self.psd_region.setRegion(self._psd_time_range)
+        self.psd_region.show()
+
+        sample_rate = self._metadata.sample_rate_hz
+        duration = self._psd_time_range[1] - self._psd_time_range[0]
+        if int(np.ceil(duration * sample_rate)) < 8:
+            return
+        self._render_psd()
+
+    def _mark_time_active(self, _ev) -> None:
+        self._active_plot = self.time_plot
+
+    def _mark_psd_active(self, _ev) -> None:
+        self._active_plot = self.psd_plot
+
+    def pan_active_plot(self, direction: int) -> None:
+        """Pan the most recently clicked plot horizontally (keyboard scroll)."""
+        plot = self._active_plot or self.time_plot
+        if plot is None:
+            return
+
+        view_box = plot.getViewBox()
+        x_min, x_max = view_box.viewRange()[0]
+        span = x_max - x_min
+        if span <= 0:
+            return
+
+        delta = span * 0.3 * direction
+        if plot is self.time_plot:
+            if self._metadata is not None and self._data is not None:
+                x_limit = (self._data.shape[0] - 1) / self._metadata.sample_rate_hz
+                new_min, new_max = self._clamp_pan(x_min, x_max, delta, 0.0, max(x_limit, 1e-9))
+            else:
+                new_min, new_max = x_min + delta, x_max + delta
+        else:
+            # PSD x-axis is logarithmic: viewRange returns log10(Hz), so clamp in
+            # log domain to keep the view within [10, Nyquist] Hz.
+            if self._metadata is not None:
+                nyquist = self._metadata.sample_rate_hz / 2.0
+                low = np.log10(10.0)
+                high = np.log10(max(nyquist, 10.0))
+                new_min, new_max = self._clamp_pan(x_min, x_max, delta, low, high)
+            else:
+                new_min, new_max = x_min + delta, x_max + delta
+
+        view_box.setXRange(new_min, new_max, padding=0.0)
+
+    @staticmethod
+    def _clamp_pan(
+        x_min: float,
+        x_max: float,
+        delta: float,
+        low: float,
+        high: float,
+    ) -> tuple[float, float]:
+        span = x_max - x_min
+        new_min = x_min + delta
+        new_max = x_max + delta
+        if new_max > high:
+            new_max = high
+            new_min = high - span
+        if new_min < low:
+            new_min = low
+            new_max = low + span
+        return new_min, new_max
 
     def _compute_psd(
         self,
@@ -246,7 +487,15 @@ class ChannelAnalysisView(QWidget):
         x_min, x_max = x_range
         y_min, y_max = y_range
         if x_min is not None and x_max is not None:
-            self.psd_plot.setXRange(x_min, x_max, padding=0.0)
+            # FMin/FMax are in Hz; the log axis works in log10 domain and needs
+            # strictly positive bounds (log10(0) would be -inf).
+            x_min = max(float(x_min), 1e-9)
+            x_max = max(float(x_max), x_min)
+            self.psd_plot.setXRange(np.log10(x_min), np.log10(x_max), padding=0.0)
+        elif self._metadata is not None:
+            nyquist = self._metadata.sample_rate_hz / 2.0
+            if nyquist > 10.0:
+                self.psd_plot.setXRange(np.log10(10.0), np.log10(nyquist), padding=0.0)
         if y_min is not None and y_max is not None:
             self.psd_plot.setYRange(y_min, y_max, padding=0.0)
 
@@ -348,6 +597,12 @@ class FkSpectrumView(QWidget):
         self.plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         for axis_name in ("left", "bottom"):
             style_axis(self.plot_widget.getAxis(axis_name), axis_font, label_font)
+        # Keep unit labels as-is ("Hz", "cycles/m"): pyqtgraph would otherwise
+        # auto-prefix them to "kHz" / "mcycles/m" based on the data range.
+        for axis_name in ("left", "bottom"):
+            axis = self.plot_widget.getAxis(axis_name)
+            axis.enableAutoSIPrefix(False)
+            axis.labelUnitPrefix = ""
 
         self.image_item = pg.ImageItem(axisOrder="row-major")
         self.plot_widget.addItem(self.image_item)

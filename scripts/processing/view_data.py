@@ -39,33 +39,52 @@ def downsample_image_for_display(
     """Decimate an image along its columns for display only.
 
     Returns ``(display, samples_per_col)``. Each block of ``stride`` original
-    columns becomes two display columns holding the block's minimum and maximum,
-    so extreme values (positive and negative peaks) are always preserved. The
-    full-resolution array is never modified, and the returned mapping lets the
-    caller re-slice the original data at higher resolution when zooming in.
+    columns becomes a single display column holding the block's mean value.
+    Averaging is an unbiased, low-pass decimation: with a fixed VMin/VMax the
+    zoomed-out image keeps the same brightness as the full-resolution view
+    instead of drifting darker (the previous "largest absolute value" rule
+    picked the block extreme and made every decimated column appear saturated).
+    The full-resolution array is never modified, and the returned mapping lets
+    the caller re-slice the original data at higher resolution when zooming in.
 
     ``samples_per_col`` maps one display column to original columns
-    (``stride / 2`` when decimated, ``1.0`` otherwise).
+    (``stride`` when decimated, ``1.0`` otherwise).
     """
     image = np.asarray(image)
     nrows, ncols = image.shape
     if ncols <= max_columns:
         return np.ascontiguousarray(image), 1.0
 
-    # 2 display columns per block (min/max) -> stride covers 2*cols/max.
-    stride = int(math.ceil(2.0 * ncols / max_columns))
+    # One display column per block -> stride covers cols/max.
+    stride = int(math.ceil(ncols / max_columns))
     nblocks = int(math.ceil(ncols / stride))
     padded = np.full((nrows, nblocks * stride), np.nan, dtype=image.dtype)
     padded[:, :ncols] = image
     blocks = padded.reshape(nrows, nblocks, stride)
     with np.errstate(invalid="ignore"):
-        block_min = np.nanmin(blocks, axis=2)
-        block_max = np.nanmax(blocks, axis=2)
+        # NaN padding only extends the final block; nanmean ignores it.
+        display = np.nanmean(blocks, axis=2)
+    display = np.nan_to_num(display, nan=0.0)
+    return np.ascontiguousarray(display, dtype=image.dtype), float(stride)
 
-    display = np.empty((nrows, nblocks * 2), dtype=image.dtype)
-    display[:, 0::2] = block_min
-    display[:, 1::2] = block_max
-    return np.ascontiguousarray(display), stride / 2.0
+
+def robust_min_max(
+    values: np.ndarray,
+    max_samples: int = _MAX_STAT_SAMPLES,
+) -> tuple[float, float]:
+    """Robust (min, max) estimated from a strided subset for very large arrays."""
+    values = np.asarray(values)
+    if values.size == 0:
+        return float("nan"), float("nan")
+    if values.size <= max_samples:
+        return float(np.nanmin(values)), float(np.nanmax(values))
+
+    nrows = values.shape[0] if values.ndim > 1 else 1
+    per_row = max(1, int(max_samples // nrows))
+    length = values.shape[-1]
+    step = max(1, int(math.ceil(length / per_row)))
+    subset = values[:, ::step] if values.ndim > 1 else values[::step]
+    return float(np.nanmin(subset)), float(np.nanmax(subset))
 
 
 def robust_median(values: np.ndarray, max_samples: int = _MAX_STAT_SAMPLES) -> float:

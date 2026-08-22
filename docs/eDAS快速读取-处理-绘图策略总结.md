@@ -77,23 +77,26 @@ data_dn = data.T - (xc / np.sum(common ** 2))[:, None] * common[None, :]
 
 ## 3. 绘图策略
 
-### 3.1 显示层降采样（信封，不丢极值）
+### 3.1 显示层降采样（单列块，无红蓝竖条）
 
 ```python
 def downsample_image_for_display(image, max_columns=16384):
-    stride = ceil(2 * ncols / max_columns)
-    # 每个 stride 列块 -> 2 列：块内 min / 块内 max
-    return display, samples_per_col  # samples_per_col = stride / 2
+    stride = ceil(ncols / max_columns)
+    # 每个 stride 列块 -> 1 列：块内 |值| 最大的采样（保留正负主导特征）
+    return display, samples_per_col  # samples_per_col = stride
 ```
 
-- 每块输出 min/max 两列，**正负极值永远保留**。
-- `samples_per_col` 用于坐标变换：`transform.scale(samples_per_col / sample_rate, 1)`。
+- 每块输出**单列**（取绝对值最大的采样），避免发散色标下 min/max 双列造成的红蓝相间竖条，同时保留正负主导特征。
+- `samples_per_col` 用于坐标变换；注意 Qt `QTransform` 后乘语义，须**先 `translate` 后 `scale`**，即 `transform.translate(frame0/sample_rate, y_start)` 再 `transform.scale(samples_per_col/sample_rate, 1)`，否则平移量会被缩放、放大/滚动后图像错位空白。
+- 色阶自动范围用 `robust_min_max()` 从原始切片稳健估计，不因降采样丢失全局极值。
 - 时间轴波形曲线用 pyqtgraph 的 `setDownsampling(auto=True, method="peak")` + `setClipToView(True)`，同样只保留显示包络。
 
 ### 3.2 LOD（Level of Detail）刷新
 
 - 可见帧切片由当前 viewBox 范围计算：`slice(floor(x0*fs), ceil(x1*fs))`。
-- `sigRangeChanged` 启动 60ms 单发 QTimer，缩放停顿后才重切可见数据并降采样上传，避免拖动时连续全量重建。
+- 缩小态（可见跨度 > 16384 列）：直接上传整条时间轴 + 降采样的粗图，滚动不留白。
+- 放大态（可见跨度 <= 16384 列）：上传"可见窗口 + 两侧 20% 余量"的全分辨率切片。
+- `sigRangeChanged` 触发 30ms **节流**（仅当定时器未激活才启动）QTimer，连续滚动时每约 30ms 重切一次，滚动结束即恢复，避免拖动时连续全量重建。
 - 完整刷新只在 `set_data` 时发生一次；之后所有重绘都是"只重算可视部分"。
 
 ### 3.3 上采样看细节
@@ -144,7 +147,7 @@ robust_abs_percentile(values, 95.0)
 - Bitshuffle 往返：`shuffle -> unshuffle` 与原数据逐元素相等，且 shuffle 输出与逐块参考实现逐字节一致（含整块、跨 chunk、末尾不完整块）。
 - `read_phase_radians`：与 `raw * (pi/32767)` 逐点一致，dtype 为 `float32`。
 - `common_mode_noise_removal`：向量化版本与逐通道循环数值一致。
-- `downsample_image_for_display`：`nanmin/nanmax(display) == nanmin/nanmax(image)`（极值不丢）。
+- `downsample_image_for_display`：单列/块、列数不超过上限、无 NaN，色阶范围经 `robust_min_max` 与全量 min/max 一致（极值不丢）。
 - 修改文件后执行：
 
 ```powershell

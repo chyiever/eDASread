@@ -526,3 +526,142 @@ python -m py_compile scripts\io\bz_codec.py scripts\io\bin_reader.py scripts\ui\
 - 位序约定：Bitshuffle 输出为"块内位平面主序"，`unpackbits`/`packbits` 必须使用 `bitorder="little"`，否则解出的 `int32` 字节序错误。
 - 显示降采样不影响导出：`Export Current View` 仍按可视窗口直接切全分辨率数据。
 - 更详细的可读/滤波/绘图策略见 `docs/eDAS快速读取-处理-绘图策略总结.md`。
+
+### 2026-08-15 修复 time-space 图刷新/色块问题并新增 Tab2 时间范围选区
+
+本次针对用户反馈的 5 个问题逐一定位并修复，并新增 Tab2 的矩形时间选区功能。
+
+#### 问题 1：调整通道范围后 101~200 区间空白
+
+- **现象**：Point End 从 100 改为 200 并 Apply 后，y 轴刻度变为 1~200，但 101~200 区间为空白，需反复切换文件才显示。
+- **原因**：`SpaceTimeView._refresh_image()` 用 `(frame0, frame_stop, display_cols)` 作为缓存键判断是否需要重新上传图像，该键只包含时间维，**不包含通道范围**；同时 `set_data()` 没有重置 `_applied_image_key`。通道范围只改变图像行数（点数），不影响键，因此新点段被 `if key == self._applied_image_key: return` 提前跳过，图像仍保持旧的 100 行。
+- **解决**：
+  - `set_data()` 开头将 `self._applied_image_key = None`，确保每次完整重载都强制重绘。
+  - 键改为 `(y_start, y_end, frame_start, frame_stop, display_cols)`，把通道范围纳入缓存键，即使不重置也能识别点段变化。
+
+#### 问题 2：左右滚动时 time-space 图变空白
+
+- **现象**：放大后左右滚动，time-space 图有时整片空白，右侧明明还有数据却不显示。
+- **原因**（两个叠加）：
+  1. **图像坐标变换顺序错误**（根本原因）：`_refresh_image()` 用 `QTransform` 先 `scale()` 后 `translate()`。Qt 的 `QTransform` 采用后乘（`T = Scale * Translate`），点映射为 `p' = Scale * (p + d)`，即平移量也被缩放。当 `frame0 != 0` 且存在降采样（`scale != 1`）时，图像被错误定位到 `frame0 / sample_rate^2`，远离可视窗口，表现为空白。只有整轴视图（`frame0 = 0`）不受影响，因此问题只在放大/滚动后显现。
+  2. LOD 刷新只在 `sigRangeChanged` 后经 60ms **单发**定时器延迟重切，且每次只切"当前可见窗口"这一窄片；滚动过程中定时器被不断重置，图像仍停留在上一次的窄切片。
+- **解决**（`space_time_view.py`）：
+  - 修正变换顺序为**先 `translate()` 后 `scale()`**，得到 `p' = Scale * p + d`，图像原点正确落在 `frame0 / sample_rate`，放大/滚动后坐标精确。
+  - `_frame_slice_for_view()` 改为：当可见帧跨度 `<= MAX_IMAGE_DISPLAY_COLUMNS` 时，切"可见窗口 + 两侧 20% 余量"的全分辨率切片；当缩小到跨度超过上限时，直接上传"整条时间轴 + 降采样"的一张粗图，覆盖全部时长。
+  - `_schedule_lod_refresh()` 由"防抖（每次重启计时）"改为"节流（仅当定时器未激活才启动）"，并把间隔降到 30ms，连续滚动时每约 30ms 重切一次，滚动结束即可恢复。
+  - 因屏幕宽度远小于 16384 列，缩小态用整轴粗图在视觉上无损。
+
+#### 问题 3：调整滤波范围后很久不更新 / 切换文件后才更新
+
+- **现象**：修改 Low Cut/High Cut 并 Apply 后长时间不更新，或只有切换文件后才更新。
+- **原因**：滤波参数变化会使 LRU 缓存 miss，后台会重新读文件并滤波（耗时正常），但结果回填后 `set_data()` 没有重置 `_applied_image_key`，而新数据形状不变，缓存键与旧图相同，`_refresh_image()` 提前返回，新滤波结果没有被上传显示。切换文件后因帧数不同、键发生变化才被迫重绘。
+- **解决**：同问题 1，`set_data()` 重置 `_applied_image_key` 并把点段纳入缓存键，滤波结果回填后必然重绘。
+
+#### 问题 4：time-space 图被切成红蓝相间竖条色块
+
+- **现象**：整图呈大量红蓝相间的竖条，而非连续波场。
+- **原因**：`downsample_image_for_display()` 把每个时间块降采样为**相邻两列**（块内 min 与块内 max）。在 `seismic` 等发散色标下，负向 min 呈蓝色、正向 max 呈红色，两列并排即形成蓝红交替竖条。
+- **解决**（`view_data.py`）：改为每块输出**单列**，取该块内绝对值最大的采样（保留正负主导特征），`samples_per_col` 由 `stride/2` 改为 `stride`；色阶自动范围改用新增的 `robust_min_max()` 从原始切片稳健估计，避免丢失全局极值。
+
+#### 问题 5：新增 Tab2 矩形时间选区
+
+- **需求**：在 Tab2 时域图上用鼠标框选时间范围；左键框选=放大，Ctrl+左键框选=不放大、仅把 PSD 计算数据限定到所选时间范围，并为选区加淡黄色阴影。
+- **实现**（`analysis_views.py`）：
+  - 新增 `TimeSelectionViewBox(pg.ViewBox)`：左键 + Ctrl 按下时进入选区模式（不调用父类，禁用 RectMode 缩放），拖动过程连续发出 `region_dragged`，释放时发出 `region_selected`；无 Ctrl 的左键拖动仍走默认 RectMode 放大。
+  - Tab2 时域图改用该 ViewBox，并添加 `pg.LinearRegionItem`（淡黄阴影、不可拖动）标记选区。
+  - `ChannelAnalysisView` 保存最近一次数据/通道/PSD 参数，`set_data` 拆分为 `_render_time_plot()`（全波形）与 `_render_psd()`（PSD 可限定时间范围）；Ctrl 框选后仅重算 PSD，波形视图不缩放。
+  - 选区内采样数 < 8 时不做 PSD，避免 `scipy.signal.welch` 报错。
+
+#### 验证记录
+
+- 语法检查通过：
+
+```powershell
+python -m py_compile scripts\processing\view_data.py scripts\render\space_time_view.py scripts\render\analysis_views.py
+```
+
+- Qt 构造检查通过：`MainWindow()` 可实例化，Tab2 时域图 ViewBox 类型为 `TimeSelectionViewBox`，`psd_region` 为 `LinearRegionItem`。
+- 数值/行为验证：
+  - `downsample_image_for_display` 输出单列/块，列数不超过上限，无 NaN。
+  - 同帧数下 Point End 100→200 重载后图像行数由 100 变为 200；替换等形数据后图像内容同步刷新（问题 1/3 修复）。
+  - `_frame_slice_for_view`：缩小态返回整轴 `slice(0, frame_count)`，放大态返回可见窗口 + 余量（问题 2 修复）。
+  - Tab2 Ctrl 框选后 `_psd_time_range` 正确更新、阴影显示、PSD 标题显示所选时间范围。
+
+### 2026-08-16 修复自动色阶不稳定 / PSD 刻度重叠并优化 Tab2 交互与标注
+
+#### 问题 6：time-space 图放大变浅、缩小变深
+
+- **现象**：矩形放大后颜色变浅，慢慢缩小（显示范围变大）后颜色突然变深。
+- **原因**：当 VMin/VMax 留空（自动色阶）时，`_resolve_levels()` 每次都用**当前可见切片** `robust_min_max()` 计算色阶。放大时切片小、局部 min/max 范围窄 → 同幅值映射到更宽色带、整体偏浅；缩小时切片回到整轴、min/max 范围宽 → 对比度突然增强、整体变深。
+- **解决**（`space_time_view.py`）：新增 `_compute_auto_levels()`，在 `set_data()` 时从整条时间轴（选定点段）一次性稳健估计 `_auto_levels` 并缓存；`_resolve_levels()` 直接复用该缓存，缩放/平移过程中色阶恒定。
+
+#### 问题 7：Tab2 PSD x 轴刻度重叠 / 科学计数法难读
+
+- **现象**：PSD 频率轴（对数坐标）刻度文字重叠，且显示为 `2·10¹`、`10²` 等科学计数/上标形式，不易读。
+- **原因**（两处）：
+  1. pyqtgraph 对数轴在跨度 < ~3 个十倍频时，`AxisItem.logTickValues()` 过滤掉间距 < 1 的层级后只剩一个 `spacing=None` 的"minor"层，含 1~9 每十倍频共 20+ 个刻度，`generateDrawSpecs()` 对顶层无条件绘制标签 → 重叠。
+  2. `AxisItem.logTickStrings()` 用 `%0.1g`（1 位有效数字），20/100 被格式化为 `2e+01`/`1e+02` 再转成上标 `2·10¹`/`10²`。
+- **解决**（`analysis_views.py`）：
+  - 新增 `FrequencyLogAxis(pg.AxisItem)`，重写 `logTickStrings()` 输出普通十进制 `10`、`20`、`100`。
+  - 该轴用于 PSD x 轴；`setTickSpacing(major=1.0, minor=0.25)` 强制每十倍频一个主刻度，`setStyle(maxTextLevel=0)` 只给主刻度画标签，1~9 次刻度不再产生标签，消除重叠。
+  - 修正对数轴范围单位：`viewRange()`/`setXRange()` 对对数轴以 `log10(Hz)` 为量纲，故 `_apply_psd_ranges()` 在设 FMin/FMax 与默认范围时统一做 `log10` 换算。
+
+#### 任务：Tab2 交互与标注优化
+
+- **键盘左右滚动**：时域图/PSD 图被点击后设为 `_active_plot`（通过 `scene().sigMouseClicked`），新增 `pan_active_plot()` 按可视跨度的 30% 平移；主窗口 `eventFilter()` 在 Tab2 激活时把左/右键转交 `channel_analysis_view.pan_active_plot()`，不再劫持给 Tab1。时域图按 `[0, 时长]` 限位，PSD 按 `[10, Nyquist]`（log10 量纲）限位。
+- **两图分割线**：Tab2 时域图与 PSD 图由固定拉伸改为 `QSplitter(Qt.Vertical)`，可拖动分割线调整两图高度。
+- **标注调整**：时域图 y 标签由 `Phase + offset (rad)` 改为 `Amplitude (rad)`；两图图例 `Ch N` 改为 `CH N`；PSD 横轴单位 Hz，默认频率范围改为 `[10 Hz, Fs/2]`（FMin/FMax 留空时）。
+
+#### 验证记录
+
+- 语法检查通过：
+
+```powershell
+python -m py_compile scripts\processing\view_data.py scripts\render\space_time_view.py scripts\render\analysis_views.py scripts\ui\main_window.py
+```
+
+- Qt 构造检查通过：`MainWindow()` 可实例化，Tab2 内为 `QSplitter`（2 个 child）。
+- 行为验证：
+  - `_auto_levels` 计算一次后 `_resolve_levels()` 放大/缩小返回值一致（色阶稳定）。
+  - PSD 轴默认范围 `[10, 500] Hz`（`log10` 域 `[1.0, 2.699]`），主刻度标签为 `10`、`100`，`maxTextLevel=0` 抑制 1~9 次刻度标签。
+  - `pan_active_plot()`：时域图右移后 x 范围被限位到 `[0, ...]`，PSD 图按 `log10` 量纲平移。
+  - 时域图 y 标签为 `Amplitude`(units=`rad`)，图例显示 `CH 5 / CH 10 / CH 15`。
+
+### 2026-08-22 参数跨文件/跨会话持久化（Tab1/Tab2/Tab3）
+
+#### 需求
+
+- Tab1/Tab2/Tab3 的参数不随更换/打开数据文件而变化；
+- 每次打开软件，默认显示最近一次使用的参数。
+
+#### 实现
+
+- 新增 `scripts/core/settings.py`：`ParameterStore` 基于 `QSettings`，显式使用 `IniFormat + UserScope`（配置文件位于 `%APPDATA%\eDASread\eDASread.ini`）。显式指定格式可避免两参构造落到 Windows 注册表，也便于测试用 `QSettings.setPath()` 整体重定向。
+- `main_window.py`：
+  - 删除 `_sync_analysis_defaults()`：原先每次加载数据都会把 Tab2 通道重置为 `5,10,15`、Tab3 通道范围重置为 `5-100`，现完全不再随文件切换改动。
+  - `_apply_auto_point_limit()` 改造：Point Start/End 一旦来自用户编辑或持久化恢复（`_point_end_manual_override=True`），不再被自动重置为 `min(点数,100)`；新增 `_clamp_point_range_to_points()` 仅当数值超出新文件通道数 `[1, points]` 时夹取，保证渲染始终有效。
+  - 新增 `_parameter_widgets()` 注册表统一管理持久化字段：Tab1 全部输入/下拉/复选项与导出目录、Tab2 通道分析全部参数、Tab3 f-k 谱全部参数，另含左侧数据目录。
+  - 自动保存：所有注册控件的用户编辑信号（`textEdited`/`currentTextChanged`/`toggled`）与波形点滚轮 `wheelStepped` 触发 600ms 单发防抖保存；`Reset` 恢复出厂值后同样触发保存；`closeEvent()` 停止计时器并强制落盘。
+  - 启动流程：构建 UI 后先 `_restore_persisted_parameters()`，再处理 `default_directory`（后者降级为"无历史记录时的回退值"），最后同步加载数据目录。
+- 兼容性：首次运行（无历史配置）仍使用原出厂默认值；恢复的 Point End 视为用户值，切换文件时只做越界夹取。
+
+#### 细节与坑
+
+- `QSettings(org, app)` 两参构造使用 NativeFormat（Windows 注册表），不受 `setDefaultFormat()`/`setPath()` 影响——测试隔离必须让生产代码与测试使用同一显式构造方式。
+- 非可编辑 `QComboBox` 恢复时先 `findText()` 校验，非法历史值直接跳过，防止脏数据破坏下拉框。
+- `WheelIntLineEdit.set_bounds()` 会把显示值静默夹取进新边界，天然满足"换文件后指定位置点仍在 Point Start~End 内"。
+
+#### 验证记录
+
+- 语法检查通过：
+
+```powershell
+python -m py_compile scripts\core\settings.py scripts\ui\main_window.py
+```
+
+- 新增离屏冒烟测试 `scripts/tests/smoke_test_parameters.py`（`QT_QPA_PLATFORM=offscreen`，`QSettings.setPath` 重定向至临时 INI），27 项断言全部通过：
+  - 启动恢复最近参数（含复选框布尔、下拉合法值校验）；
+  - 切换文件后 Tab2/Tab3 参数不变；大文件下 Point Start/End 保持原值，小文件（40 点）仅把 Point End 夹取到 40；
+  - `closeEvent` 落盘后第二次启动完整恢复修改值；
+  - 恢复的 Point End 正确置位 `_point_end_manual_override`。
+- 测试期间误写入注册表 `HKCU:\Software\eDASread` 的临时数据已清理。

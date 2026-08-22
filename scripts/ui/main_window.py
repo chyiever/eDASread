@@ -13,6 +13,7 @@ from PyQt5.QtCore import QEvent, Qt, QThreadPool, QTimer
 from PyQt5.QtGui import QFont, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - Windows-only playback backend
 from scripts.core.cache import LruByteCache
 from scripts.core.models import FileMetadata, FilterConfig
 from scripts.core.resources import asset_path
+from scripts.core.settings import ParameterStore
 from scripts.io.bin_reader import (
     batch_compress_bin_folder,
     build_export_filename,
@@ -98,21 +100,21 @@ class MainWindow(QMainWindow):
             border: 1px solid #b7c1ce;
             top: -1px;
         }
+        QTabBar {
+            font-family: "Microsoft YaHei", "SimSun";
+            font-size: 18px;
+            font-weight: 600;
+        }
         QTabBar::tab {
             background: #eef1f5;
             border: 1px solid #c4ccd6;
             padding: 8px 40px;
-            font-family: "Microsoft YaHei", "SimSun";
-            font-size: 18px;
-            font-weight: 600;
             color: #1f2937;
         }
         QTabBar::tab:selected {
             background: #2f6db2;
             color: white;
             border-color: #224f82;
-            font-size: 19px;
-            font-weight: 700;
         }
         QTabBar::tab:hover:!selected {
             background: #dbe7f5;
@@ -156,8 +158,18 @@ class MainWindow(QMainWindow):
         self._directory_load_timer.setSingleShot(True)
         self._directory_load_timer.setInterval(400)
         self._directory_load_timer.timeout.connect(self._load_directory_from_timer)
+        self._parameter_store = ParameterStore()
+        self._parameter_save_timer = QTimer(self)
+        self._parameter_save_timer.setSingleShot(True)
+        self._parameter_save_timer.setInterval(600)
+        self._parameter_save_timer.timeout.connect(self._save_parameters)
         self._build_layout()
         self._connect_signals()
+        self._connect_parameter_autosave()
+        restored_keys = self._restore_persisted_parameters()
+        if "tab1/point_end" in restored_keys:
+            # Persisted point range belongs to the user: keep it across files.
+            self._point_end_manual_override = True
         self._on_waveform_point_changed()
         self.setStyleSheet(self.BUTTON_STYLE)
 
@@ -171,11 +183,13 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self.status_note_label)
         self.setStatusBar(status_bar)
 
-        if default_directory is not None:
+        if not self.file_browser.path_edit.text().strip() and default_directory is not None:
             self.file_browser.path_edit.setText(str(default_directory))
+        if not self.control_panel.export_path_edit.text().strip() and default_directory is not None:
             self.control_panel.export_path_edit.setText(str(default_directory))
-            self._directory_load_timer.stop()
-            self.load_directory(show_errors=False)
+
+        self._directory_load_timer.stop()
+        self.load_directory(show_errors=False)
 
     def _build_layout(self) -> None:
         title_font = QFont("SimHei", 30)
@@ -224,6 +238,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(tab1_panel, "Tab1 数据预处理")
         self.plot_tabs.addTab(self.channel_analysis_view, "Tab2 通道时域/PSD")
         self.plot_tabs.addTab(self.fk_spectrum_view, "Tab3 f-k谱")
+        self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
 
         splitter = QSplitter()
         splitter.addWidget(self.file_browser)
@@ -284,10 +299,26 @@ class MainWindow(QMainWindow):
                 return super().eventFilter(watched, event)
 
             direction = -1 if event.key() == Qt.Key_Left else 1
+
+            # Tab2 owns its own keyboard scrolling (the most recently clicked
+            # time/PSD plot), so do not hijack left/right while Tab2 is active.
+            if self.plot_tabs.currentWidget() is self.channel_analysis_view:
+                self.channel_analysis_view.pan_active_plot(direction)
+                return True
+
             self._step_horizontal_scroll(direction)
             return True
 
         return super().eventFilter(watched, event)
+
+    def closeEvent(self, event) -> None:
+        """Persist the latest parameters so they reload on next launch."""
+        self._directory_load_timer.stop()
+        self._parameter_save_timer.stop()
+        try:
+            self._save_parameters()
+        finally:
+            super().closeEvent(event)
 
     def _schedule_directory_load(self) -> None:
         """Debounce directory loading while the user edits the path."""
@@ -619,7 +650,6 @@ class MainWindow(QMainWindow):
         self.current_filter_config = payload["filter_config"]
         self.current_preprocess_steps = []
         self._apply_auto_point_limit(metadata=self.current_metadata)
-        self._sync_analysis_defaults()
         try:
             self._render_current_data()
         except Exception as exc:
@@ -904,21 +934,72 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
 
-    def _sync_analysis_defaults(self) -> None:
-        if self.current_metadata is None:
-            return
+    def _parameter_widgets(self) -> dict[str, QWidget]:
+        panel = self.control_panel
+        tab2 = self.channel_analysis_view
+        tab3 = self.fk_spectrum_view
+        return {
+            "data/browser_folder": self.file_browser.path_edit,
+            "tab1/point_start": panel.point_start_edit,
+            "tab1/point_end": panel.point_end_edit,
+            "tab1/vmin": panel.vmin_edit,
+            "tab1/vmax": panel.vmax_edit,
+            "tab1/colormap": panel.colormap_combo,
+            "tab1/filter_type": panel.filter_type_combo,
+            "tab1/low_cut": panel.low_cut_edit,
+            "tab1/high_cut": panel.high_cut_edit,
+            "tab1/waveform_point": panel.waveform_point_edit,
+            "tab1/fk_spacing": panel.fk_spacing_edit,
+            "tab1/fk_vmin": panel.fk_vmin_edit,
+            "tab1/fk_vmax": panel.fk_vmax_edit,
+            "tab1/export_folder": panel.export_path_edit,
+            "tab1/save_filtered": panel.save_filtered_checkbox,
+            "tab1/save_as_txt": panel.save_as_txt_checkbox,
+            "tab2/channels": tab2.channels_edit,
+            "tab2/psd_nperseg": tab2.psd_nperseg_edit,
+            "tab2/psd_overlap": tab2.psd_overlap_edit,
+            "tab2/psd_fmin": tab2.psd_fmin_edit,
+            "tab2/psd_fmax": tab2.psd_fmax_edit,
+            "tab2/psd_ymin": tab2.psd_ymin_edit,
+            "tab2/psd_ymax": tab2.psd_ymax_edit,
+            "tab3/channel_range": tab3.channel_range_edit,
+            "tab3/spacing": tab3.spacing_edit,
+            "tab3/spatial_taper": tab3.spatial_taper_edit,
+            "tab3/temporal_taper": tab3.temporal_taper_edit,
+            "tab3/nfft_channels": tab3.nfft_channels_edit,
+            "tab3/nfft_samples": tab3.nfft_samples_edit,
+            "tab3/remove_background": tab3.remove_bg_checkbox,
+            "tab3/fmin": tab3.fmin_edit,
+            "tab3/fmax": tab3.fmax_edit,
+            "tab3/kmin": tab3.kmin_edit,
+            "tab3/kmax": tab3.kmax_edit,
+            "tab3/vmin_db": tab3.vmin_db_edit,
+            "tab3/vmax_db": tab3.vmax_db_edit,
+        }
 
-        max_point = self.current_metadata.points
-        default_channels = [channel for channel in (5, 10, 15) if channel <= max_point]
-        if not default_channels:
-            default_channels = list(range(1, min(max_point, 3) + 1))
-        self.channel_analysis_view.channels_edit.setText(",".join(str(channel) for channel in default_channels))
+    def _connect_parameter_autosave(self) -> None:
+        for widget in self._parameter_widgets().values():
+            if isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._schedule_parameter_save)
+            elif isinstance(widget, QComboBox):
+                widget.currentTextChanged.connect(self._schedule_parameter_save)
+            else:
+                widget.textEdited.connect(self._schedule_parameter_save)
+        # Wheel stepping changes the waveform point without a textEdited event.
+        self.control_panel.waveform_point_edit.wheelStepped.connect(self._schedule_parameter_save)
 
-        range_start = 5 if max_point >= 5 else 1
-        range_end = min(max_point, 100)
-        if range_start > range_end:
-            range_start = 1
-        self.fk_spectrum_view.channel_range_edit.setText(f"{range_start}-{range_end}")
+    def _schedule_parameter_save(self, *_args) -> None:
+        self._parameter_save_timer.start()
+
+    def _save_parameters(self) -> None:
+        self._parameter_store.save_widgets(self._parameter_widgets())
+
+    def _restore_persisted_parameters(self) -> set[str]:
+        """Load the most recent parameter values into Tab1/Tab2/Tab3 controls."""
+        try:
+            return self._parameter_store.restore_widgets(self._parameter_widgets())
+        except Exception:
+            return {}
 
     def _parse_channel_list(self, text: str) -> list[int]:
         if self.current_metadata is None:
@@ -1156,6 +1237,7 @@ class MainWindow(QMainWindow):
         self.control_panel.fk_vmin_edit.setText("800")
         self.control_panel.fk_vmax_edit.setText("1200")
         self._sync_waveform_point_bounds()
+        self._schedule_parameter_save()
 
         if selected_file is not None:
             try:
@@ -1230,9 +1312,31 @@ class MainWindow(QMainWindow):
         metadata: FileMetadata | None = None,
     ) -> None:
         if self._point_end_manual_override:
+            points = metadata.points if metadata is not None else None
+            if points is None and file_path is not None:
+                points = infer_points_from_filename(file_path)
+            self._clamp_point_range_to_points(points)
             return
         self.control_panel.point_end_edit.setText(self._default_point_end_value(file_path=file_path, metadata=metadata))
         self._sync_waveform_point_bounds()
+
+    def _clamp_point_range_to_points(self, points: int | None) -> None:
+        """Keep the user-owned point range across files; clamp only out-of-range values."""
+        if points is None or points < 1:
+            return
+        start_text = self.control_panel.point_start_edit.text().strip()
+        end_text = self.control_panel.point_end_edit.text().strip()
+        try:
+            start_value = int(start_text)
+            end_value = int(end_text)
+        except ValueError:
+            return
+        new_start = max(1, min(start_value, points))
+        new_end = max(new_start, min(end_value, points))
+        if new_start != start_value:
+            self.control_panel.point_start_edit.setText(str(new_start))
+        if new_end != end_value:
+            self.control_panel.point_end_edit.setText(str(new_end))
 
     def _sync_waveform_point_bounds(self) -> None:
         start_text = self.control_panel.point_start_edit.text().strip()
