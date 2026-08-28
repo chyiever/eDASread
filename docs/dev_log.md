@@ -821,3 +821,13 @@ python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py 
 ```
 
 离屏构造 `TimeFrequencyAnalysisView` 并填入合成时频数据，在 `1200x900` 窗口中读到：时域图高度 `220 px`、时频图高度 `521 px`、色标高度 `521 px`。
+
+### 2026-08-28 文档同步与版本推送
+
+- 更新 `README.md`：
+  - 主要功能列表新增 Tab4 条目（单通道时域波形与短时时频图、对数频率轴）；
+  - 新增完整的 "Tab4 时域/时频" 参数说明小节，覆盖通道、滤波、模式（PSD/Amplitude）、数值标度（Log/Linear）、窗长、重叠、FMin/FMax、VMin/VMax、显示窗口、Colormap、颜色自动、x 轴双向联动与键盘平移；
+  - 功能列表补充空 bin 文件读取保护说明。
+- 更新 `docs/readme.md`：文档总览的主要能力列表补充 Tab1 预处理、Tab2 PSD、Tab3 f-k 谱、Tab4 时频图与空文件保护条目。
+- 验证：`py_compile` 全部通过；离屏 Qt 构造检查输出 4 个页签标题 `['Tab1 数据预处理', 'Tab2 通道时域/PSD', 'Tab3 f-k谱', 'Tab4 时域/时频']`。
+- 提交 `0219310`（Add Tab4 waveform/time-frequency view, harden empty bin file handling, update README and docs）并推送到 `origin/dev`；按用户决定 main 分支保持不变。
