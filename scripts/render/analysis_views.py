@@ -756,50 +756,49 @@ class TimeFrequencyAnalysisView(QWidget):
         ui_font = QFont("Times New Roman", 10)
         axis_font = QFont("Times New Roman", 16)
         label_font = QFont("Times New Roman", 16)
-        for widget in [
-            self.channel_edit,
-            self.filter_type_combo,
-            self.low_cut_edit,
-            self.high_cut_edit,
-            self.tf_mode_combo,
-            self.tf_scale_combo,
-            self.window_seconds_edit,
-            self.visible_window_seconds_edit,
-            self.overlap_percent_edit,
-            self.fmin_edit,
-            self.fmax_edit,
-            self.vmin_edit,
-            self.vmax_edit,
+        compact_edits = [
+            self.channel_edit, self.low_cut_edit, self.high_cut_edit,
+            self.window_seconds_edit, self.visible_window_seconds_edit,
+            self.overlap_percent_edit, self.fmin_edit, self.fmax_edit,
+            self.vmin_edit, self.vmax_edit,
+        ]
+        compact_combos = [
+            self.filter_type_combo, self.tf_mode_combo, self.tf_scale_combo,
             self.colormap_combo,
-            self.auto_color_checkbox,
-            self.plot_button,
-        ]:
+        ]
+        for widget in compact_edits + compact_combos:
             widget.setFont(ui_font)
-        for edit in [self.low_cut_edit, self.high_cut_edit, self.fmin_edit, self.fmax_edit, self.vmin_edit, self.vmax_edit]:
+        for widget in compact_edits:
+            widget.setMaximumWidth(80)
+        for widget in compact_combos:
+            widget.setMaximumWidth(100)
+        self.auto_color_checkbox.setFont(ui_font)
+        self.plot_button.setFont(ui_font)
+        for edit in compact_edits:
             edit.setPlaceholderText("auto")
 
         controls = QGroupBox("Tab4 时域/时频参数")
         controls.setFont(ui_font)
         controls_layout = QGridLayout(controls)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(6)
+        controls_layout.setContentsMargins(6, 4, 6, 4)
+        controls_layout.setHorizontalSpacing(6)
+        controls_layout.setVerticalSpacing(2)
         controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit), 0, 0)
         controls_layout.addWidget(self._labeled_widget("滤波", self.filter_type_combo), 0, 1)
         controls_layout.addWidget(self._labeled_widget("Low Cut", self.low_cut_edit), 0, 2)
         controls_layout.addWidget(self._labeled_widget("High Cut", self.high_cut_edit), 0, 3)
-        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo), 1, 0)
-        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo), 1, 1)
-        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit), 1, 2)
-        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit), 1, 3)
-        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit), 2, 0)
-        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit), 2, 1)
-        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit), 2, 2)
-        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit), 2, 3)
-        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit), 3, 0)
-        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo), 3, 1)
-        controls_layout.addWidget(self.auto_color_checkbox, 3, 2)
-        controls_layout.addWidget(self.plot_button, 3, 3)
+        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo), 0, 4)
+        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo), 0, 5)
+        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit), 0, 6)
+        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit), 0, 7)
+        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit), 1, 0)
+        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit), 1, 1)
+        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit), 1, 2)
+        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit), 1, 3)
+        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit), 1, 4)
+        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo), 1, 5)
+        controls_layout.addWidget(self.auto_color_checkbox, 1, 6)
+        controls_layout.addWidget(self.plot_button, 1, 7)
 
         self._metadata: FileMetadata | None = None
         self._channel = 1
@@ -816,12 +815,17 @@ class TimeFrequencyAnalysisView(QWidget):
         self.time_plot.setLabel("bottom", "Time")
         self.time_plot.setTitle("指定通道时域波形", color=AXIS_TEXT_COLOR)
         self._style_plot(self.time_plot, axis_font, label_font)
+        # Fix the left-axis width so the plot area does not shift when the
+        # time-frequency y tick labels change digit count while zooming.
+        self.time_plot.getAxis("left").setWidth(96)
         self.time_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.time_curve = self.time_plot.plot(pen=pg.mkPen("#cc2222", width=1.2))
         self.time_curve.setClipToView(True)
         self.time_curve.setDownsampling(auto=True, method="peak")
         self.time_right_spacer = QWidget()
-        self.time_right_spacer.setFixedWidth(156)
+        # 150 px matches the histogram width (150) including the 6px layout
+        # spacing so the two plot areas stay left/right aligned.
+        self.time_right_spacer.setFixedWidth(150)
 
         time_row = QWidget()
         time_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -840,6 +844,8 @@ class TimeFrequencyAnalysisView(QWidget):
         self.tf_plot.setLabel("bottom", "Time")
         self.tf_plot.setTitle("短时时频图", color=AXIS_TEXT_COLOR)
         self._style_plot(self.tf_plot, axis_font, label_font)
+        # Same fixed left-axis width as time_plot to keep time axes aligned.
+        self.tf_plot.getAxis("left").setWidth(96)
         self.tf_plot.showGrid(x=True, y=False, alpha=0.22)
         self.tf_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.tf_plot.getViewBox().setAspectLocked(False)
@@ -945,6 +951,10 @@ class TimeFrequencyAnalysisView(QWidget):
         color_map = COLOR_MAPS.get(colormap_name.lower(), COLOR_MAPS["jet"])
         self.tf_image_item.setColorMap(color_map)
         self.histogram_widget.gradient.setColorMap(color_map)
+        if value_scale.strip().lower() == "log":
+            self.histogram_widget.item.axis.setLabel(text="Amplitude", units="dB")
+        else:
+            self.histogram_widget.item.axis.setLabel(text="Amplitude", units="")
 
         times = np.asarray(tf_result["time_s"], dtype=np.float32)
         x0 = float(times[0])
@@ -1108,8 +1118,8 @@ class TimeFrequencyAnalysisView(QWidget):
         for axis_name in ("left", "bottom"):
             axis = plot_widget.getAxis(axis_name)
             style_axis(axis, axis_font, label_font)
-            tick_length = -8 if axis_name == "left" else 8
-            axis.setStyle(tickLength=tick_length)
+            # Positive tickLength points outward for both left and bottom axes.
+            axis.setStyle(tickLength=8)
             axis.enableAutoSIPrefix(False)
             axis.labelUnitPrefix = ""
         plot_widget.getViewBox().setMouseEnabled(x=True, y=True)

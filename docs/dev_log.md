@@ -831,3 +831,42 @@ python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py 
 - 更新 `docs/readme.md`：文档总览的主要能力列表补充 Tab1 预处理、Tab2 PSD、Tab3 f-k 谱、Tab4 时频图与空文件保护条目。
 - 验证：`py_compile` 全部通过；离屏 Qt 构造检查输出 4 个页签标题 `['Tab1 数据预处理', 'Tab2 通道时域/PSD', 'Tab3 f-k谱', 'Tab4 时域/时频']`。
 - 提交 `0219310`（Add Tab4 waveform/time-frequency view, harden empty bin file handling, update README and docs）并推送到 `origin/dev`；按用户决定 main 分支保持不变。
+
+### 2026-08-29 Tab4 改进：时间刻度对齐、刻度朝向、紧凑布局、色标 dB 单位、logo 更换
+
+#### 需求
+
+- 放大 Tab4 时频图时，y 轴刻度数字位数会变化（如 `100` → `1000`），导致时频图左侧轴自动宽度发生变化，进而使时域图与时频图下方的时间刻度无法在像素上对齐。
+- 时频图 y 轴刻度需要朝外。
+- Tab4 参数区原来占用 4 行、每个输入框过宽，浪费空间，需优化布局。
+- `数值` 选择 `Log` 模式时，时频图右侧色标需要显示相对单位 `dB`。
+- 将软件所有 logo 更换为新图（源图为 `assets/eDASread-logo2.png`）。
+
+#### 实现（scripts/render/analysis_views.py）
+
+- **时间刻度对齐（根因修复）**
+  - 根因：pyqtgraph `AxisItem` 在 `fixedWidth=None` 时按刻度文本宽度自动调整轴宽（`_updateWidth()` 中 `w = self.textWidth`）。时频图左轴 `LogFrequencyAxis` 的主刻度标签是 `10`、`100`、`1000` 等 10 的幂，缩放时可见 decade 变化使标签位数变化，轴宽随之变化，导致绘图区 x 方向位移。
+  - 修复：对 `time_plot` 与 `tf_plot` 的左轴均调用 `setWidth(96)` 固定宽度，缩放时轴宽不再变化，两图绘图区 x 起点与宽度始终一致。
+  - 追加修正右侧对齐：原 `time_right_spacer` 宽度为 `156`，但 `tf_row_layout` 中 histogram（`setFixedWidth(150)`）与 plot 之间还有 `6` px 布局间距，两者右侧占位分别为 `156+6=162` 与 `150+6=156`，导致时域图 ViewBox 恒比时频图窄 `6` px。将 `time_right_spacer` 改为 `150`，使两侧占位一致。
+- **y 轴刻度朝外**：pyqtgraph 中 `tickLength` 为负值时刻度线伸向绘图区内侧（`p2[axis] += tickLength*tickDir`，左轴 `tickDir=-1`），原实现 `left: -8` 为朝内。统一改为正值 `8`，左轴刻度朝外、底轴刻度朝下（仅调整 Tab4 的 `_style_plot`，与 Tab2 独立）。
+- **紧凑布局**：将参数区从 `4 行 × 4 列` 改为 `2 行 × 8 列`；数值输入框 `setMaximumWidth(80)`、下拉框 `setMaximumWidth(100)`，并压缩 `QGridLayout` 的 margins/spacing，减少占用高度。
+- **色标 dB 单位**：`set_result()` 中根据 `value_scale` 动态设置色标轴标签——`Log` 时 `setLabel(text="Amplitude", units="dB")`，`Linear` 时 `units=""`；初始化时保持默认无单位，每次绘图按当前 `数值` 选项刷新。
+
+#### logo 更换（assets/）
+
+- 源图：`assets/eDASread-logo2.png`（1132×1132 RGBA）。
+- 生成运行时 logo `assets/eDASread_logo.png`（256×256，程序实际引用此文件）。
+- 用 `QImage` 生成打包用 `assets/eDASread_logo.ico`（与 `build_exe.py::_build_icon` 逻辑一致）。
+- 删除冗余旧 logo：`eDASread-logo1.png`、`eDASread-logo2.ico`、`eDASread_logo.ico1`、`eDASread_logo1.png`。
+
+#### 验证记录
+
+- 语法检查通过：
+```powershell
+python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py scripts\processing\time_frequency.py scripts\io\bin_reader.py scripts\workers\tasks.py
+```
+- 离屏 `TimeFrequencyAnalysisView` 合成信号（2000 Hz、4096 点、30 Hz 正弦、0.256 s 窗、50% 重叠）验证：
+  - `time_plot` 与 `tf_plot` 左轴 `fixedWidth=96`、`tickLength=8`；
+  - 缩放前与 `setYRange(1.0, 2.4)` 缩放后，两图 ViewBox 场景矩形均为 `x=97.0, width=946.5`，x 起点与宽度精确一致；
+  - `值 scale=log` 时色标 `labelText=Amplitude, labelUnits=dB`；`value_scale=linear` 时 `labelUnits` 为空。
+- 离屏 `MainWindow` 构造检查：4 个页签、标题 logo `setPixmap` 非空。
