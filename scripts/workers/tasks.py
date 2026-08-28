@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import traceback
-
 from PyQt5.QtCore import QObject, QRunnable, pyqtSignal
 
 
@@ -33,8 +31,8 @@ class FunctionWorker(QRunnable):
             if self.progress_callback_arg is not None:
                 kwargs[self.progress_callback_arg] = self.signals.progress.emit
             result = self.fn(*self.args, **kwargs)
-        except Exception:
-            self.signals.error.emit(traceback.format_exc())
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
         else:
             self.signals.result.emit(result)
         finally:

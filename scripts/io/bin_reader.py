@@ -92,6 +92,9 @@ def _inspect_raw_bin_file(path: Path) -> FileMetadata:
         )
 
     file_size_bytes = path.stat().st_size
+    if file_size_bytes <= 0:
+        raise ValueError(f"File {path.name} is empty and cannot be loaded.")
+
     total_values, remainder = divmod(file_size_bytes, RAW_BYTES_PER_POINT)
     if remainder != 0:
         raise ValueError(
@@ -102,6 +105,8 @@ def _inspect_raw_bin_file(path: Path) -> FileMetadata:
         raise ValueError(
             f"File {path.name} size does not match inferred point count {points}"
         )
+    if frame_count <= 0:
+        raise ValueError(f"File {path.name} contains no complete data frames.")
 
     duration_s = frame_count / sample_rate_hz
     return FileMetadata(
@@ -191,6 +196,9 @@ def read_bin_memmap(metadata: FileMetadata) -> np.ndarray:
     """Read a phase data file as a 2D int32 array shaped as frames x points."""
     if is_bz_path(metadata.file_path):
         return read_bz_file(metadata.file_path)
+
+    if metadata.file_size_bytes <= 0 or metadata.frame_count <= 0:
+        raise ValueError(f"File {metadata.file_path.name} contains no readable data frames.")
 
     return np.memmap(
         metadata.file_path,

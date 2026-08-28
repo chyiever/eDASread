@@ -10,6 +10,7 @@ from PyQt5.QtCore import QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -17,6 +18,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -25,6 +27,7 @@ from scipy import signal
 
 from scripts.core.models import FileMetadata
 from scripts.processing.view_data import robust_abs_percentile, robust_median
+from scripts.processing.time_frequency import build_log_frequency_display_grid
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.space_time_view import COLOR_MAPS
 from scripts.render.time_axis import TimeAxisItem
@@ -476,7 +479,10 @@ class ChannelAnalysisView(QWidget):
         plot_widget.setBackground("w")
         plot_widget.showGrid(x=True, y=True, alpha=0.15)
         for axis_name in ("left", "bottom"):
-            style_axis(plot_widget.getAxis(axis_name), axis_font, label_font)
+            axis = plot_widget.getAxis(axis_name)
+            style_axis(axis, axis_font, label_font)
+            tick_length = -8 if axis_name == "left" else 8
+            axis.setStyle(tickLength=tick_length)
         plot_widget.getViewBox().setMouseEnabled(x=True, y=True)
 
     def _apply_psd_ranges(
@@ -687,6 +693,426 @@ class FkSpectrumView(QWidget):
         if range_min is None or range_max is None:
             return fallback_min, fallback_max
         return range_min, range_max
+
+    def _labeled_widget(self, label_text: str, widget: QWidget) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        label = QLabel(label_text)
+        label.setFont(widget.font())
+        layout.addWidget(label)
+        layout.addWidget(widget, 1)
+        return container
+
+
+class LogFrequencyAxis(pg.AxisItem):
+    """Axis for y values stored as log10(Hz), labelled as real Hz."""
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802
+        labels = []
+        for value in values:
+            decade = float(value)
+            rounded = round(decade)
+            if abs(decade - rounded) > 1e-6:
+                labels.append("")
+                continue
+            frequency = 10.0 ** rounded
+            labels.append(f"{frequency:.0f}")
+        return labels
+
+
+class TimeFrequencyAnalysisView(QWidget):
+    """Tab4 widget for one channel waveform and short-time spectrum."""
+
+    plot_requested = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.channel_edit = QLineEdit("1")
+        self.filter_type_combo = QComboBox()
+        self.filter_type_combo.addItems(["none", "lowpass", "highpass", "bandpass"])
+        self.filter_type_combo.setCurrentText("none")
+        self.low_cut_edit = QLineEdit()
+        self.high_cut_edit = QLineEdit()
+        self.tf_mode_combo = QComboBox()
+        self.tf_mode_combo.addItems(["PSD", "Amplitude"])
+        self.tf_scale_combo = QComboBox()
+        self.tf_scale_combo.addItems(["Log", "Linear"])
+        self.window_seconds_edit = QLineEdit("0.01")
+        self.visible_window_seconds_edit = QLineEdit("0.1")
+        self.overlap_percent_edit = QLineEdit("50")
+        self.fmin_edit = QLineEdit()
+        self.fmax_edit = QLineEdit()
+        self.vmin_edit = QLineEdit()
+        self.vmax_edit = QLineEdit()
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(["jet", "hsv", "seismic"])
+        self.colormap_combo.setCurrentText("jet")
+        self.auto_color_checkbox = QCheckBox("颜色自动")
+        self.auto_color_checkbox.setChecked(True)
+        self.plot_button = QPushButton("绘制时频图")
+
+        ui_font = QFont("Times New Roman", 10)
+        axis_font = QFont("Times New Roman", 16)
+        label_font = QFont("Times New Roman", 16)
+        for widget in [
+            self.channel_edit,
+            self.filter_type_combo,
+            self.low_cut_edit,
+            self.high_cut_edit,
+            self.tf_mode_combo,
+            self.tf_scale_combo,
+            self.window_seconds_edit,
+            self.visible_window_seconds_edit,
+            self.overlap_percent_edit,
+            self.fmin_edit,
+            self.fmax_edit,
+            self.vmin_edit,
+            self.vmax_edit,
+            self.colormap_combo,
+            self.auto_color_checkbox,
+            self.plot_button,
+        ]:
+            widget.setFont(ui_font)
+        for edit in [self.low_cut_edit, self.high_cut_edit, self.fmin_edit, self.fmax_edit, self.vmin_edit, self.vmax_edit]:
+            edit.setPlaceholderText("auto")
+
+        controls = QGroupBox("Tab4 时域/时频参数")
+        controls.setFont(ui_font)
+        controls_layout = QGridLayout(controls)
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        controls_layout.setHorizontalSpacing(8)
+        controls_layout.setVerticalSpacing(6)
+        controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit), 0, 0)
+        controls_layout.addWidget(self._labeled_widget("滤波", self.filter_type_combo), 0, 1)
+        controls_layout.addWidget(self._labeled_widget("Low Cut", self.low_cut_edit), 0, 2)
+        controls_layout.addWidget(self._labeled_widget("High Cut", self.high_cut_edit), 0, 3)
+        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo), 1, 0)
+        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo), 1, 1)
+        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit), 1, 2)
+        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit), 1, 3)
+        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit), 2, 0)
+        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit), 2, 1)
+        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit), 2, 2)
+        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit), 2, 3)
+        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit), 3, 0)
+        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo), 3, 1)
+        controls_layout.addWidget(self.auto_color_checkbox, 3, 2)
+        controls_layout.addWidget(self.plot_button, 3, 3)
+
+        self._metadata: FileMetadata | None = None
+        self._channel = 1
+        self._trace: np.ndarray | None = None
+        self._tf_log_bounds: tuple[float, float] | None = None
+        self._active_plot: pg.PlotWidget | None = None
+        self._syncing_x_ranges = False
+
+        self.time_axis = TimeAxisItem(orientation="bottom")
+        self.time_plot = pg.PlotWidget(axisItems={"bottom": self.time_axis})
+        self.time_plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.time_plot.setMinimumHeight(180)
+        self.time_plot.setLabel("left", "Phase", units="rad")
+        self.time_plot.setLabel("bottom", "Time")
+        self.time_plot.setTitle("指定通道时域波形", color=AXIS_TEXT_COLOR)
+        self._style_plot(self.time_plot, axis_font, label_font)
+        self.time_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
+        self.time_curve = self.time_plot.plot(pen=pg.mkPen("#cc2222", width=1.2))
+        self.time_curve.setClipToView(True)
+        self.time_curve.setDownsampling(auto=True, method="peak")
+        self.time_right_spacer = QWidget()
+        self.time_right_spacer.setFixedWidth(156)
+
+        time_row = QWidget()
+        time_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        time_row.setMinimumHeight(200)
+        time_row_layout = QHBoxLayout(time_row)
+        time_row_layout.setContentsMargins(0, 0, 0, 0)
+        time_row_layout.setSpacing(6)
+        time_row_layout.addWidget(self.time_plot, 1)
+        time_row_layout.addWidget(self.time_right_spacer)
+
+        self.tf_axis = TimeAxisItem(orientation="bottom")
+        self.tf_plot = pg.PlotWidget(axisItems={"bottom": self.tf_axis, "left": LogFrequencyAxis(orientation="left")})
+        self.tf_plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tf_plot.setMinimumHeight(360)
+        self.tf_plot.setLabel("left", "Frequency", units="Hz")
+        self.tf_plot.setLabel("bottom", "Time")
+        self.tf_plot.setTitle("短时时频图", color=AXIS_TEXT_COLOR)
+        self._style_plot(self.tf_plot, axis_font, label_font)
+        self.tf_plot.showGrid(x=True, y=False, alpha=0.22)
+        self.tf_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
+        self.tf_plot.getViewBox().setAspectLocked(False)
+        self.tf_plot.setAutoVisible(y=False)
+        self.tf_plot.enableAutoRange(axis="y", enable=False)
+        self.time_plot.getViewBox().sigXRangeChanged.connect(self._on_time_x_range_changed)
+        self.tf_plot.getViewBox().sigXRangeChanged.connect(self._on_tf_x_range_changed)
+        self.tf_plot.getViewBox().sigYRangeChanged.connect(self._update_frequency_axis_ticks)
+        self.tf_image_item = pg.ImageItem(axisOrder="row-major")
+        self.tf_plot.addItem(self.tf_image_item)
+        self.tf_image_item.setColorMap(COLOR_MAPS["jet"])
+
+        self.histogram_widget = pg.HistogramLUTWidget(orientation="vertical")
+        self.histogram_widget.setImageItem(self.tf_image_item)
+        self.histogram_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.histogram_widget.setFixedWidth(150)
+        self.histogram_widget.setBackground("w")
+        self.histogram_widget.item.axis.setLabel(text="Amplitude", units="")
+        style_axis(self.histogram_widget.item.axis, axis_font, label_font)
+        self.histogram_widget.gradient.setColorMap(COLOR_MAPS["jet"])
+
+        tf_row = QWidget()
+        tf_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        tf_row.setMinimumHeight(380)
+        tf_row_layout = QHBoxLayout(tf_row)
+        tf_row_layout.setContentsMargins(0, 0, 0, 0)
+        tf_row_layout.setSpacing(6)
+        tf_row_layout.addWidget(self.tf_plot, 1)
+        tf_row_layout.addWidget(self.histogram_widget)
+
+        plot_splitter = QSplitter(Qt.Vertical)
+        plot_splitter.setChildrenCollapsible(False)
+        plot_splitter.addWidget(time_row)
+        plot_splitter.addWidget(tf_row)
+        plot_splitter.setStretchFactor(0, 1)
+        plot_splitter.setStretchFactor(1, 4)
+        plot_splitter.setHandleWidth(8)
+        plot_splitter.setSizes([220, 520])
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(controls)
+        layout.addWidget(plot_splitter, 1)
+
+        self._active_plot: pg.PlotWidget | None = self.time_plot
+
+        self.plot_button.clicked.connect(self.plot_requested)
+        for edit in [
+            self.channel_edit,
+            self.low_cut_edit,
+            self.high_cut_edit,
+            self.window_seconds_edit,
+            self.visible_window_seconds_edit,
+            self.overlap_percent_edit,
+            self.fmin_edit,
+            self.fmax_edit,
+            self.vmin_edit,
+            self.vmax_edit,
+        ]:
+            edit.returnPressed.connect(self.plot_requested)
+        self.time_plot.scene().sigMouseClicked.connect(self._mark_time_active)
+        self.tf_plot.scene().sigMouseClicked.connect(self._mark_tf_active)
+
+    def set_result(
+        self,
+        *,
+        metadata: FileMetadata,
+        channel: int,
+        trace: np.ndarray,
+        tf_result: dict[str, np.ndarray],
+        frequency_range: tuple[float | None, float | None],
+        levels: tuple[float | None, float | None],
+        auto_levels: bool,
+        colormap_name: str,
+        value_scale: str,
+        visible_window_seconds: float | None = None,
+    ) -> None:
+        self._metadata = metadata
+        self._channel = int(channel)
+        self._trace = np.asarray(trace, dtype=np.float32)
+        self.time_axis.set_reference_time(metadata.start_time)
+        self.tf_axis.set_reference_time(metadata.start_time)
+        x_values = np.arange(self._trace.size, dtype=np.float32) / metadata.sample_rate_hz
+        centered_trace = self._trace - robust_median(self._trace)
+        self.time_curve.setData(x_values, centered_trace)
+        self.time_plot.setTitle(f"指定通道时域波形：CH {channel}", color=AXIS_TEXT_COLOR)
+        duration_s = self._time_x_limit()
+        self.time_plot.setLimits(xMin=0.0, xMax=duration_s)
+        self.time_plot.enableAutoRange()
+
+        display_values, log_freq = build_log_frequency_display_grid(
+            tf_result["frequency_hz"],
+            tf_result["values"],
+            mode=str(tf_result.get("mode", "psd")),
+            value_scale=value_scale,
+        )
+        if display_values.size == 0 or log_freq.size == 0:
+            raise ValueError("时频图没有可显示的正频率数据。")
+
+        self._tf_log_bounds = (float(log_freq[0]), float(log_freq[-1]))
+        self.tf_image_item.setImage(display_values, autoLevels=False)
+        color_map = COLOR_MAPS.get(colormap_name.lower(), COLOR_MAPS["jet"])
+        self.tf_image_item.setColorMap(color_map)
+        self.histogram_widget.gradient.setColorMap(color_map)
+
+        times = np.asarray(tf_result["time_s"], dtype=np.float32)
+        x0 = float(times[0])
+        x1 = float(times[-1])
+        dx = float(np.median(np.diff(times))) if times.size > 1 else 1.0
+        dy = float(np.median(np.diff(log_freq))) if log_freq.size > 1 else 0.01
+        self.tf_image_item.setRect(QRectF(x0 - 0.5 * dx, float(log_freq[0]) - 0.5 * dy, max(dx, x1 - x0 + dx), max(dy, float(log_freq[-1] - log_freq[0]) + dy)))
+        self.tf_plot.getViewBox().setAspectLocked(False)
+        self.tf_plot.enableAutoRange(axis="y", enable=False)
+        self.tf_plot.setLimits(xMin=0.0, xMax=duration_s, yMin=float(log_freq[0]) - dy, yMax=float(log_freq[-1]) + 1.2 * dy)
+        self._apply_frequency_range(frequency_range)
+        self._update_frequency_axis_ticks()
+        self._apply_color_levels(display_values, levels, auto_levels)
+        display_duration = duration_s
+        if visible_window_seconds is not None:
+            display_duration = min(duration_s, max(float(visible_window_seconds), 1e-9))
+        self._set_linked_x_range(0.0, display_duration)
+        mode_label = "PSD" if str(tf_result.get("mode", "psd")) == "psd" else "Amplitude"
+        self.tf_plot.setTitle(f"短时时频图：CH {channel}, {mode_label}", color=AXIS_TEXT_COLOR)
+
+    def pan_active_plot(self, direction: int) -> None:
+        plot = self._active_plot or self.time_plot
+        view_box = plot.getViewBox()
+        x_min, x_max = view_box.viewRange()[0]
+        span = x_max - x_min
+        if span <= 0:
+            return
+        delta = span * 0.3 * direction
+        low, high = self._common_x_limit()
+        new_min, new_max = ChannelAnalysisView._clamp_pan(x_min, x_max, delta, low, high)
+        view_box.setXRange(new_min, new_max, padding=0.0)
+
+    def _time_x_limit(self) -> float:
+        if self._metadata is None or self._trace is None:
+            return 1.0
+        return max(self._trace.size / self._metadata.sample_rate_hz, 1e-9)
+
+    def _tf_x_limit(self) -> tuple[float, float]:
+        rect = self.tf_image_item.boundingRect()
+        return float(rect.left()), float(rect.right())
+
+    def _common_x_limit(self) -> tuple[float, float]:
+        return 0.0, self._time_x_limit()
+
+    def _on_time_x_range_changed(self, _view_box, x_range) -> None:
+        self._sync_x_range(self.tf_plot, x_range)
+
+    def _on_tf_x_range_changed(self, _view_box, x_range) -> None:
+        self._sync_x_range(self.time_plot, x_range)
+
+    def _sync_x_range(self, target_plot: pg.PlotWidget, x_range) -> None:
+        if self._syncing_x_ranges or self._metadata is None or self._trace is None:
+            return
+
+        x_min, x_max = self._clamp_x_range(float(x_range[0]), float(x_range[1]))
+        target_min, target_max = target_plot.getViewBox().viewRange()[0]
+        if np.isclose(x_min, target_min) and np.isclose(x_max, target_max):
+            return
+
+        self._syncing_x_ranges = True
+        try:
+            target_plot.setXRange(x_min, x_max, padding=0.0)
+        finally:
+            self._syncing_x_ranges = False
+
+    def _set_linked_x_range(self, x_min: float, x_max: float) -> None:
+        x_min, x_max = self._clamp_x_range(x_min, x_max)
+        self._syncing_x_ranges = True
+        try:
+            self.time_plot.setXRange(x_min, x_max, padding=0.0)
+            self.tf_plot.setXRange(x_min, x_max, padding=0.0)
+        finally:
+            self._syncing_x_ranges = False
+
+    def _clamp_x_range(self, x_min: float, x_max: float) -> tuple[float, float]:
+        low, high = self._common_x_limit()
+        if not np.isfinite(x_min) or not np.isfinite(x_max) or x_max <= x_min:
+            return low, high
+
+        span = min(x_max - x_min, high - low)
+        new_min = x_min
+        new_max = x_min + span
+        if new_min < low:
+            new_min = low
+            new_max = low + span
+        if new_max > high:
+            new_max = high
+            new_min = high - span
+        return new_min, new_max
+
+    def _mark_time_active(self, _ev) -> None:
+        self._active_plot = self.time_plot
+
+    def _mark_tf_active(self, _ev) -> None:
+        self._active_plot = self.tf_plot
+
+    def _apply_frequency_range(self, frequency_range: tuple[float | None, float | None]) -> None:
+        if self._tf_log_bounds is None:
+            self.tf_plot.getAxis("left").setTicks(None)
+            return
+        y_min, y_max = frequency_range
+        lower_bound, upper_bound = self._tf_log_bounds
+        if y_min is None or y_max is None:
+            self.tf_plot.setYRange(lower_bound, upper_bound, padding=0.0)
+            return
+        log_min = max(np.log10(max(float(y_min), 1e-9)), lower_bound)
+        log_max = min(np.log10(max(float(y_max), 1e-9)), upper_bound)
+        if log_min >= log_max:
+            raise ValueError("时频图频率范围超出可显示频段。")
+        self.tf_plot.setYRange(log_min, log_max, padding=0.0)
+
+    def _update_frequency_axis_ticks(self, *_args) -> None:
+        axis = self.tf_plot.getAxis("left")
+        if self._tf_log_bounds is None:
+            axis.setTicks(None)
+            return
+
+        y_min, y_max = sorted(float(value) for value in self.tf_plot.getViewBox().viewRange()[1])
+        if not np.isfinite(y_min) or not np.isfinite(y_max) or y_max <= y_min:
+            return
+
+        lo_decade = int(np.floor(y_min))
+        hi_decade = int(np.ceil(y_max))
+        major_ticks: list[tuple[float, str]] = []
+        minor_ticks: list[tuple[float, str]] = []
+        for decade in range(lo_decade, hi_decade + 1):
+            tick = float(decade)
+            if y_min <= tick <= y_max:
+                major_ticks.append((tick, f"{10.0 ** decade:.0f}"))
+            for factor in range(2, 10):
+                sub_tick = decade + float(np.log10(factor))
+                if y_min <= sub_tick <= y_max:
+                    minor_ticks.append((sub_tick, ""))
+
+        axis.setTicks([major_ticks, minor_ticks])
+
+    def _apply_color_levels(
+        self,
+        values: np.ndarray,
+        levels: tuple[float | None, float | None],
+        auto_levels: bool,
+    ) -> None:
+        if auto_levels:
+            finite = values[np.isfinite(values)]
+            if finite.size == 0:
+                return
+            level_min = float(np.nanpercentile(finite, 2.0))
+            level_max = float(np.nanpercentile(finite, 99.5))
+            if level_min >= level_max:
+                level_min = level_max - 1.0
+        else:
+            level_min, level_max = levels
+            if level_min is None or level_max is None or level_min >= level_max:
+                raise ValueError("时频图颜色范围需要满足 VMin < VMax。")
+        self.tf_image_item.setLevels((level_min, level_max))
+        self.histogram_widget.item.setLevels(level_min, level_max)
+
+    def _style_plot(self, plot_widget: pg.PlotWidget, axis_font: QFont, label_font: QFont) -> None:
+        plot_widget.setBackground("w")
+        plot_widget.showGrid(x=True, y=True, alpha=0.15)
+        for axis_name in ("left", "bottom"):
+            axis = plot_widget.getAxis(axis_name)
+            style_axis(axis, axis_font, label_font)
+            tick_length = -8 if axis_name == "left" else 8
+            axis.setStyle(tickLength=tick_length)
+            axis.enableAutoSIPrefix(False)
+            axis.labelUnitPrefix = ""
+        plot_widget.getViewBox().setMouseEnabled(x=True, y=True)
 
     def _labeled_widget(self, label_text: str, widget: QWidget) -> QWidget:
         container = QWidget()

@@ -665,3 +665,159 @@ python -m py_compile scripts\core\settings.py scripts\ui\main_window.py
   - `closeEvent` 落盘后第二次启动完整恢复修改值；
   - 恢复的 Point End 正确置位 `_point_end_manual_override`。
 - 测试期间误写入注册表 `HKCU:\Software\eDASread` 的临时数据已清理。
+
+### 2026-08-28 新增 Tab4 单通道时域/时频图
+
+#### 需求
+
+- 新增 Tab4，用于显示指定通道的时域波形（上）和短时时频图（下）。
+- Tab4 使用 Tab1 当前处理后的 `current_data`，但可在 Tab4 内对指定通道进一步低通/高通/带通滤波。
+- 支持通道号、滤波参数、时频窗长、重叠比例、PSD/Amplitude 模式、Log/Linear 数值显示、频率轴范围、颜色范围与色标设置。
+- 时域图和时频图均支持矩形放大；键盘左右键按最近点击的 Tab4 图进行水平平移。
+- 时频图纵轴按对数频率显示，并参考 FIPread 的实现，避免直接把线性频率谱贴到对数轴造成显示失真。
+
+#### 实现
+
+- 新增 `scripts/processing/time_frequency.py`：
+  - `compute_time_frequency_map()` 使用 `scipy.signal.spectrogram()` 计算短时谱；
+  - PSD 模式使用 `scaling="density", mode="psd"`；
+  - Amplitude 模式使用 `scaling="spectrum", mode="magnitude"`；
+  - `build_log_frequency_display_grid()` 将线性频率输出重采样到等间距 `log10(f)` 网格，再交给 `ImageItem` 显示。
+- 更新 `scripts/render/analysis_views.py`：
+  - 新增 `LogFrequencyAxis`，内部坐标为 `log10(Hz)`，刻度标签显示真实 Hz；
+  - 新增 `TimeFrequencyAnalysisView`；
+  - 上方 `PlotWidget` 绘制单通道时域波形，启用 peak downsampling 和 clip-to-view；
+  - 下方 `PlotWidget + ImageItem + HistogramLUTWidget` 绘制时频图和颜色条；
+  - 两个图均使用 `ViewBox.RectMode` 支持鼠标矩形放大；
+  - 记录最近点击的时域图/时频图，`pan_active_plot()` 用于键盘左右平移。
+- 更新 `scripts/ui/main_window.py`：
+  - 创建并添加 `"Tab4 时域/时频"`；
+  - 新增 `plot_time_frequency()`，通过 `FunctionWorker` 后台执行 Tab4 单通道滤波与时频计算；
+  - 新增 `_build_tab4_filter_config()`、`_read_tab4_time_frequency_options()`、`_read_channel_number()`；
+  - Tab4 控件加入 `_parameter_widgets()`，支持跨文件、跨会话持久化；
+  - `eventFilter()` 在 Tab4 激活时把左右键交给 `time_frequency_view.pan_active_plot()`。
+
+#### 参数约定
+
+- `通道` 使用 1-based 通道号，与 Tab1/Tab2/Tab3 一致。
+- `滤波` 支持 `none / lowpass / highpass / bandpass`：
+  - highpass 使用 `Low Cut`；
+  - lowpass 使用 `High Cut`；
+  - bandpass 同时使用 `Low Cut` 和 `High Cut`。
+- `窗长(s)` 为 spectrogram 的 `nperseg = round(window_seconds * sample_rate)`，并限制在 `[8, trace_length]`。
+- `重叠(%)` 对应 `noverlap = nperseg * overlap_percent / 100`，有效范围 `[0, 100)`。
+- `FMin/FMax` 是时频图纵轴显示范围，单位 Hz；对数频率显示下必须大于 0。
+- `VMin/VMax` 是时频图颜色范围；勾选 `颜色自动` 时使用数据分位数自动设置。
+
+#### 验证记录
+
+- 语法检查通过：
+```powershell
+python -m py_compile scripts\processing\time_frequency.py scripts\render\analysis_views.py scripts\ui\main_window.py
+```
+
+- Qt 构造检查通过：
+```powershell
+$env:QT_QPA_PLATFORM='offscreen'; python -c "import sys; from PyQt5.QtWidgets import QApplication; from scripts.ui.main_window import MainWindow; app=QApplication(sys.argv); w=MainWindow(); print(w.plot_tabs.count(), [w.plot_tabs.tabText(i) for i in range(w.plot_tabs.count())]); w.close(); app.quit()"
+```
+输出 Tab 数量为 `4`，标题为 `['Tab1 数据预处理', 'Tab2 通道时域/PSD', 'Tab3 f-k谱', 'Tab4 时域/时频']`。
+
+- 合成信号时频计算与 Tab4 渲染入口验证通过：
+  - 1000 Hz 采样率、4096 点、30 Hz 正弦信号；
+  - `window_seconds=0.256`、`overlap_percent=50`；
+  - spectrogram 输出矩阵 `(129, 31)`；
+  - 去掉 0 Hz 后的对数显示矩阵 `(128, 31)`；
+  - Tab4 `set_result()` 可完成时域曲线、时频图、色标和频率范围设置。
+
+#### 2026-08-28 补充：修正 Tab4 时频图 y 轴刻度标签
+
+- 问题：Tab4 时频图 y 轴使用 `log10(Hz)` 坐标，但原先直接格式化 pyqtgraph 自动生成的普通线性刻度，导致显示 `158`、`251` 等不符合常规对数频率图习惯的标签。
+- 修正：
+  - `LogFrequencyAxis.tickStrings()` 对非整数 decade 位置返回空标签；
+  - `TimeFrequencyAnalysisView` 新增 `_update_frequency_axis_ticks()`，参考 FIPread 的实际做法，手动设置左轴 ticks；
+  - 主刻度只显示 `10`、`100`、`1000` 等 10 的整数次幂；
+  - 2..9 倍频位置作为次刻度保留但不显示文本；
+  - 时频图 y 轴范围变化后自动刷新刻度。
+- 验证：
+```powershell
+python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py scripts\processing\time_frequency.py
+$env:QT_QPA_PLATFORM='offscreen'; python -c "import sys, numpy as np; from PyQt5.QtWidgets import QApplication; from scripts.render.analysis_views import LogFrequencyAxis; app=QApplication(sys.argv); axis=LogFrequencyAxis('left'); print(axis.tickStrings([1.0, 2.0, 2.2, 2.4, 3.0], 1, 1)); app.quit()"
+```
+输出为 `['10', '100', '', '', '1000']`。
+
+#### 2026-08-28 补充：Tab4 时域图与时频图横轴联动
+
+- 新增 Tab4 上下两个子图的 x 轴双向同步：
+  - 时域图矩形放大或水平平移时，时频图自动切换到相同时间范围；
+  - 时频图矩形放大或水平平移时，时域图自动切换到相同时间范围；
+  - 键盘左右键平移继续按最近点击的子图触发，但最终两个子图保持一致。
+- 两个子图统一使用原始通道 trace 的时间范围 `[0, trace_length / sample_rate]` 作为横轴边界，避免时频图因 spectrogram 窗中心时间而产生独立边界。
+- 实现细节：
+  - `TimeFrequencyAnalysisView` 连接两个 ViewBox 的 `sigXRangeChanged`；
+  - 新增 `_syncing_x_ranges` 防止双向同步递归；
+  - 新增 `_set_linked_x_range()`、`_sync_x_range()`、`_clamp_x_range()`，保证同步后的范围有效且不越界；
+  - 内部状态初始化提前到信号连接之前，避免 Qt 初始化阶段的 range 信号访问未初始化属性。
+- 验证：
+```powershell
+python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py scripts\processing\time_frequency.py
+```
+合成信号离屏验证中，`time_plot.setXRange(1.0, 2.0)` 后两个子图均为 `[1.0, 2.0]`；`tf_plot.setXRange(2.0, 3.0)` 后两个子图均为 `[2.0, 3.0]`。
+
+#### 2026-08-28 补充：Tab2/Tab4 坐标轴刻度方向
+
+- 调整 `scripts/render/analysis_views.py` 中 Tab2 和 Tab4 的绘图轴样式：
+  - 左侧纵轴刻度线朝外；
+  - 底部横轴刻度线朝下。
+- 实现方式：
+  - 在 `ChannelAnalysisView._style_plot()` 和 `TimeFrequencyAnalysisView._style_plot()` 中，按 pyqtgraph 的轴方向规则分别设置 `left: tickLength=-8`、`bottom: tickLength=8`；
+  - 调整范围仅限 Tab2/Tab4，不影响 Tab1 time-space 图和 Tab3 f-k 图。
+- 验证：
+```powershell
+python -m py_compile scripts\render\analysis_views.py
+```
+离屏构造检查确认 Tab2/Tab4 的 `left` 轴 `tickLength=-8`、`bottom` 轴 `tickLength=8`；Tab4 时频图 y 轴 decade 标签仍输出 `['10', '100', '', '', '1000']`。
+
+#### 2026-08-28 补充：空 bin 文件读取保护
+
+- 问题：目录中存在 0 字节 `.bin` 文件时，`inspect_bin_file()` 会生成 `frame_count=0` 的 metadata，随后 `read_bin_memmap()` 调用 `np.memmap()` 时报错 `ValueError: cannot mmap an empty file`，并通过后台 worker 弹出完整 traceback。
+- 修正：
+  - `_inspect_raw_bin_file()` 在解析阶段检查 `file_size_bytes <= 0`，空文件直接报 `File <name> is empty and cannot be loaded.`；
+  - `_inspect_raw_bin_file()` 检查 `frame_count <= 0`，避免无完整帧文件继续进入读取流程；
+  - `read_bin_memmap()` 增加二次保护，拒绝 `file_size_bytes <= 0` 或 `frame_count <= 0` 的 metadata；
+  - `FunctionWorker` 的错误信号改为发送 `str(exc)`，用户界面显示简洁错误，不再显示完整 traceback。
+- 验证：
+```powershell
+python -m py_compile scripts\io\bin_reader.py scripts\workers\tasks.py scripts\ui\main_window.py
+```
+临时创建 0 字节测试文件后，`inspect_bin_file()` 输出 `ValueError File eDAS-2000Hz-0100pt-20260828T000000.bin is empty and cannot be loaded.`。
+
+#### 2026-08-28 补充：Tab4 初始显示窗口与时间轴像素对齐
+
+- 新增 Tab4 `显示窗口(s)` 参数：
+  - 默认值 `0.1`；
+  - 绘制完成后，上方时域图和下方时频图默认显示 `[0, 显示窗口]` 时间段；
+  - 填写 `auto` 或留空时显示完整 trace 时长；
+  - 参数加入持久化键 `tab4/visible_window_seconds`。
+- 修正 Tab4 上下时间轴刻度像素对齐：
+  - 下方时频图右侧有 150 px 色标，上方时域图右侧新增等宽空白占位，使上下两个绘图区宽度一致；
+  - 上下两个 PlotWidget 的左轴固定为 `96` px，底部时间轴固定为 `62` px；
+  - 同步 x 轴范围后，两个子图的时间刻度在屏幕像素位置上保持上下对齐。
+- 验证：
+```powershell
+python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py scripts\processing\time_frequency.py
+```
+合成信号离屏验证中，`visible_window_seconds=0.1` 时上下两个子图初始 x 范围均为 `[0.0, 0.1]`；Tab4 两个左轴 `fixedWidth=96`，两个底轴 `fixedHeight=62`。
+
+#### 2026-08-28 补充：增大 Tab4 时频图显示高度
+
+- 问题：Tab4 下方 `tf_plot + HistogramLUTWidget` 位于同一个水平行内，右侧色标固定宽度但高度随父容器扩展；左侧 `PlotWidget` 内部还有标题、坐标轴和固定底轴高度，若垂直 splitter 初始尺寸由默认 `sizeHint` 分配，容易出现色标很高、时频图实际绘图区偏矮且下方留白较大的观感。
+- 修正：在 `scripts/render/analysis_views.py` 中为 Tab4 时域图、时频图、下方时频行和色标设置明确的 `QSizePolicy` 与最小高度，并给垂直 `QSplitter` 设置初始尺寸 `[220, 520]`，让主要高度分配给短时时频图。
+- 范围：仅调整 Tab4 布局尺寸策略，不改变时频计算、坐标轴联动、颜色范围或数据渲染逻辑。
+
+验证：
+
+```powershell
+python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py scripts\processing\time_frequency.py
+```
+
+离屏构造 `TimeFrequencyAnalysisView` 并填入合成时频数据，在 `1200x900` 窗口中读到：时域图高度 `220 px`、时频图高度 `521 px`、色标高度 `521 px`。

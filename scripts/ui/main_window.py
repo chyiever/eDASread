@@ -54,7 +54,8 @@ from scripts.io.bin_reader import (
 from scripts.io.text_export import write_phase_txt
 from scripts.processing.denoise_pipeline import apply_denoise_step, compute_fk_spectrum_db
 from scripts.processing.filters import apply_filter
-from scripts.render.analysis_views import ChannelAnalysisView, FkSpectrumView
+from scripts.processing.time_frequency import compute_time_frequency_map
+from scripts.render.analysis_views import ChannelAnalysisView, FkSpectrumView, TimeFrequencyAnalysisView
 from scripts.render.space_time_view import SpaceTimeView
 from scripts.ui.control_panel import ControlPanel
 from scripts.ui.file_browser import FileBrowserPanel
@@ -147,6 +148,7 @@ class MainWindow(QMainWindow):
         self.space_time_view = SpaceTimeView()
         self.channel_analysis_view = ChannelAnalysisView()
         self.fk_spectrum_view = FkSpectrumView()
+        self.time_frequency_view = TimeFrequencyAnalysisView()
         self.plot_tabs = QTabWidget()
         self.horizontal_scroll = QScrollBar(Qt.Horizontal)
         self.vertical_scroll = QScrollBar(Qt.Vertical)
@@ -238,6 +240,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(tab1_panel, "Tab1 数据预处理")
         self.plot_tabs.addTab(self.channel_analysis_view, "Tab2 通道时域/PSD")
         self.plot_tabs.addTab(self.fk_spectrum_view, "Tab3 f-k谱")
+        self.plot_tabs.addTab(self.time_frequency_view, "Tab4 时域/时频")
         self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
 
         splitter = QSplitter()
@@ -286,6 +289,7 @@ class MainWindow(QMainWindow):
 
         self.channel_analysis_view.plot_requested.connect(self.plot_selected_channels)
         self.fk_spectrum_view.plot_requested.connect(self.plot_fk_spectrum)
+        self.time_frequency_view.plot_requested.connect(self.plot_time_frequency)
 
         self.space_time_view.view_range_changed.connect(self._sync_scrollbars_to_view)
         self.horizontal_scroll.valueChanged.connect(self._on_horizontal_scroll)
@@ -304,6 +308,9 @@ class MainWindow(QMainWindow):
             # time/PSD plot), so do not hijack left/right while Tab2 is active.
             if self.plot_tabs.currentWidget() is self.channel_analysis_view:
                 self.channel_analysis_view.pan_active_plot(direction)
+                return True
+            if self.plot_tabs.currentWidget() is self.time_frequency_view:
+                self.time_frequency_view.pan_active_plot(direction)
                 return True
 
             self._step_horizontal_scroll(direction)
@@ -851,6 +858,85 @@ class MainWindow(QMainWindow):
             f"Tab3 已绘制 f-k 谱：Ch {payload['channel_start']}-{payload['channel_end']}"
         )
 
+    def plot_time_frequency(self) -> None:
+        """Compute and draw Tab4 waveform and time-frequency map."""
+        if self.current_metadata is None or self.current_data is None:
+            self._show_error("No file loaded.")
+            return
+
+        try:
+            channel = self._read_channel_number(self.time_frequency_view.channel_edit, "Tab4 通道")
+            filter_config = self._build_tab4_filter_config()
+            tf_options = self._read_tab4_time_frequency_options()
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+
+        self.statusBar().showMessage("Tab4 时频图计算中 ...")
+        worker = FunctionWorker(
+            self._compute_time_frequency_for_view,
+            self.current_data,
+            self.current_metadata,
+            channel,
+            filter_config,
+            tf_options,
+            self.current_file_path,
+        )
+        self._active_workers.add(worker)
+        worker.signals.result.connect(self._on_time_frequency_ready)
+        worker.signals.error.connect(self._show_error)
+        worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self.thread_pool.start(worker)
+
+    def _compute_time_frequency_for_view(
+        self,
+        data: np.ndarray,
+        metadata: FileMetadata,
+        channel: int,
+        filter_config: FilterConfig,
+        tf_options: dict,
+        file_path: Path | None,
+    ) -> dict:
+        trace = np.asarray(data[:, channel - 1], dtype=np.float32).reshape(-1, 1)
+        if filter_config.is_enabled():
+            trace = apply_filter(trace, metadata.sample_rate_hz, filter_config)
+        trace_1d = np.asarray(trace[:, 0], dtype=np.float32)
+        tf_result = compute_time_frequency_map(
+            trace_1d,
+            metadata.sample_rate_hz,
+            window_seconds=tf_options["window_seconds"],
+            overlap_percent=tf_options["overlap_percent"],
+            mode=tf_options["mode"],
+        )
+        return {
+            "metadata": metadata,
+            "channel": channel,
+            "trace": trace_1d,
+            "tf_result": tf_result,
+            "tf_options": tf_options,
+            "file_path": file_path,
+        }
+
+    def _on_time_frequency_ready(self, payload: dict) -> None:
+        if self.current_file_path != payload["file_path"]:
+            self.statusBar().showMessage("时频图结果已过期：当前文件已切换。")
+            return
+
+        options = payload["tf_options"]
+        self.time_frequency_view.set_result(
+            metadata=payload["metadata"],
+            channel=payload["channel"],
+            trace=payload["trace"],
+            tf_result=payload["tf_result"],
+            frequency_range=options["frequency_range"],
+            levels=options["levels"],
+            auto_levels=options["auto_levels"],
+            colormap_name=options["colormap_name"],
+            value_scale=options["value_scale"],
+            visible_window_seconds=options["visible_window_seconds"],
+        )
+        self.statusBar().showMessage(f"Tab4 已绘制时域/时频图：Ch {payload['channel']}")
+
     def play_current_waveform(self) -> None:
         """Play the selected Tab1 waveform channel as scaled audio."""
         if winsound is None:
@@ -938,6 +1024,7 @@ class MainWindow(QMainWindow):
         panel = self.control_panel
         tab2 = self.channel_analysis_view
         tab3 = self.fk_spectrum_view
+        tab4 = self.time_frequency_view
         return {
             "data/browser_folder": self.file_browser.path_edit,
             "tab1/point_start": panel.point_start_edit,
@@ -975,6 +1062,21 @@ class MainWindow(QMainWindow):
             "tab3/kmax": tab3.kmax_edit,
             "tab3/vmin_db": tab3.vmin_db_edit,
             "tab3/vmax_db": tab3.vmax_db_edit,
+            "tab4/channel": tab4.channel_edit,
+            "tab4/filter_type": tab4.filter_type_combo,
+            "tab4/low_cut": tab4.low_cut_edit,
+            "tab4/high_cut": tab4.high_cut_edit,
+            "tab4/mode": tab4.tf_mode_combo,
+            "tab4/value_scale": tab4.tf_scale_combo,
+            "tab4/window_seconds": tab4.window_seconds_edit,
+            "tab4/visible_window_seconds": tab4.visible_window_seconds_edit,
+            "tab4/overlap_percent": tab4.overlap_percent_edit,
+            "tab4/fmin": tab4.fmin_edit,
+            "tab4/fmax": tab4.fmax_edit,
+            "tab4/vmin": tab4.vmin_edit,
+            "tab4/vmax": tab4.vmax_edit,
+            "tab4/colormap": tab4.colormap_combo,
+            "tab4/auto_color": tab4.auto_color_checkbox,
         }
 
     def _connect_parameter_autosave(self) -> None:
@@ -1111,6 +1213,68 @@ class MainWindow(QMainWindow):
             "wavenumber_range": wavenumber_range,
         }
 
+    def _build_tab4_filter_config(self) -> FilterConfig:
+        tab4 = self.time_frequency_view
+        filter_type = tab4.filter_type_combo.currentText().strip().lower()
+        low_text = tab4.low_cut_edit.text().strip()
+        high_text = tab4.high_cut_edit.text().strip()
+        return FilterConfig(
+            filter_type=filter_type,
+            low_cut_hz=float(low_text) if low_text else None,
+            high_cut_hz=float(high_text) if high_text else None,
+            order=4,
+        )
+
+    def _read_tab4_time_frequency_options(self) -> dict:
+        tab4 = self.time_frequency_view
+        window_seconds = self._read_positive_float(tab4.window_seconds_edit, "Tab4 时频窗长")
+        overlap_percent = self._read_optional_float(
+            tab4.overlap_percent_edit,
+            "Tab4 时频重叠比例",
+            default=50.0,
+        )
+        if overlap_percent < 0 or overlap_percent >= 100:
+            raise ValueError("Tab4 时频重叠比例必须位于 [0, 100)%。")
+
+        visible_window_seconds = self._read_optional_float(
+            tab4.visible_window_seconds_edit,
+            "Tab4 显示窗口长度",
+            default=None,
+        )
+        if visible_window_seconds is not None and visible_window_seconds <= 0:
+            raise ValueError("Tab4 显示窗口长度必须大于 0，或填写 auto/留空。")
+
+        frequency_range = self._read_optional_range(
+            tab4.fmin_edit,
+            tab4.fmax_edit,
+            "Tab4 频率范围",
+            positive_or_zero=False,
+        )
+        if frequency_range[0] is not None and (frequency_range[0] <= 0 or frequency_range[1] <= 0):
+            raise ValueError("Tab4 对数频率显示范围必须大于 0。")
+
+        levels = self._read_optional_range(
+            tab4.vmin_edit,
+            tab4.vmax_edit,
+            "Tab4 颜色范围",
+            positive_or_zero=False,
+        )
+        auto_levels = tab4.auto_color_checkbox.isChecked()
+        if not auto_levels and (levels[0] is None or levels[1] is None):
+            raise ValueError("关闭颜色自动时，需要同时填写 Tab4 VMin 和 VMax。")
+
+        return {
+            "mode": tab4.tf_mode_combo.currentText().strip().lower(),
+            "value_scale": tab4.tf_scale_combo.currentText().strip().lower(),
+            "window_seconds": window_seconds,
+            "visible_window_seconds": visible_window_seconds,
+            "overlap_percent": overlap_percent,
+            "frequency_range": frequency_range,
+            "levels": levels,
+            "auto_levels": auto_levels,
+            "colormap_name": tab4.colormap_combo.currentText().strip().lower() or "jet",
+        }
+
     def _read_tab1_fk_parameters(self) -> tuple[float, float, float]:
         spacing_m = self._read_positive_float(self.control_panel.fk_spacing_edit, "FK 通道间距")
         vmin_mps = self._read_positive_float(self.control_panel.fk_vmin_edit, "FK VMin")
@@ -1118,6 +1282,20 @@ class MainWindow(QMainWindow):
         if np.isclose(vmin_mps, vmax_mps):
             raise ValueError("FK VMin 和 VMax 不能相等。")
         return spacing_m, vmin_mps, vmax_mps
+
+    def _read_channel_number(self, line_edit: QLineEdit, name: str) -> int:
+        if self.current_metadata is None:
+            raise ValueError("No file loaded.")
+        text = line_edit.text().strip()
+        if not text:
+            raise ValueError(f"{name}不能为空。")
+        try:
+            channel = int(text)
+        except ValueError as exc:
+            raise ValueError(f"{name}必须是整数。") from exc
+        if channel < 1 or channel > self.current_metadata.points:
+            raise ValueError(f"{name}必须位于 1-{self.current_metadata.points}。")
+        return channel
 
     def _read_fk_db_levels(self) -> tuple[float, float]:
         vmin_db = self._read_float(self.fk_spectrum_view.vmin_db_edit, "f-k VMin(dB)")
