@@ -870,3 +870,31 @@ python -m py_compile scripts\render\analysis_views.py scripts\ui\main_window.py 
   - 缩放前与 `setYRange(1.0, 2.4)` 缩放后，两图 ViewBox 场景矩形均为 `x=97.0, width=946.5`，x 起点与宽度精确一致；
   - `值 scale=log` 时色标 `labelText=Amplitude, labelUnits=dB`；`value_scale=linear` 时 `labelUnits` 为空。
 - 离屏 `MainWindow` 构造检查：4 个页签、标题 logo `setPixmap` 非空。
+
+### 2026-08-29 移除标题栏 logo + 修复 Tab1 上下时间刻度对齐
+
+#### 需求
+
+- 软件左上角标题栏（软件名字左侧）不再显示 logo；但窗口最小化、任务栏以及打包生成的 exe 仍需保留 logo 图标。
+- Tab1（数据预处理）上方的指定点时域波形图与下方的 time-space 图，在 ViewBox 左侧未对齐：点号范围较大（如数千点）时，Point Index 左轴标签位数增多导致轴宽变大，下方图整体右移。
+
+#### 实现
+
+- **移除标题栏 logo（`scripts/ui/main_window.py`）**
+  - 删除 `self.title_logo_label` 的创建、`_build_layout()` 中的 `setFixedSize/setAlignment/setPixmap` 设置，以及标题行布局中 `title_logo_label` 与其对称占位 `right_spacer` 的加入；标题栏改由两个 `addStretch(1)` 夹住标题居中。
+  - 清理不再使用的 `QPixmap` 导入。
+  - 保留 `_apply_window_icons()`（`__init__` 中调用）与 `app.py` 的 `app.setWindowIcon()`，用于窗口最小化/任务栏图标；打包图标由 `build_exe.py --icon`（使用 `assets/eDASread_logo.ico`）提供。
+- **修复 Tab1 上下时间刻度对齐（`scripts/render/space_time_view.py`）**
+  - 根因：两个子图左轴 `fixedWidth=None`，pyqtgraph 按刻度文本宽度自动调整轴宽。当可见点号范围增大时，下方 `Point Index` 轴标签（如 `1000`/`8000`）比上方 `Phase` 轴（小数，如 `-0.05`）更宽，实测差距可达 `87.4 px` vs `57.4 px`，使下方 ViewBox 起点右移约 `30 px`。
+  - 修复：与 Tab4 一致，对 `waveform_plot` 与 `plot_widget` 的左轴均 `setWidth(96)`，固定为相同宽度；两子图本就通过 `waveform_plot.setXLink(self.plot_widget)` 同步 x 轴且右侧占位对称（`waveform_right_spacer` 150 vs `histogram_widget` 150），固定左轴后左右完全对齐，缩放/大数据量下不再偏移。
+
+#### 验证记录
+
+- 语法检查通过：
+```powershell
+python -m py_compile scripts\ui\main_window.py scripts\render\space_time_view.py scripts\render\analysis_views.py
+```
+- 离屏 `SpaceTimeView` 合成数据验证（2000 帧 × 9000 点、采样率 500 Hz、显示点号 1-9000、波形点 500）：
+  - 上方波形图与下方 time-space 图 ViewBox 场景矩形均为 `x=97.0, width=946.5`，x 起点与宽度精确一致；
+  - 两者左轴 `fixedWidth=96`。
+- 离屏 `MainWindow` 检查：`hasattr(window, 'title_logo_label')` 为 `False`（标题栏 logo 已移除）；`window.windowIcon()` 与 `app.windowIcon()` 均非空（最小化/任务栏图标保留）。

@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt5.QtCore import QEvent, Qt, QThreadPool, QTimer
-from PyQt5.QtGui import QFont, QIcon, QPixmap
+from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -153,7 +153,6 @@ class MainWindow(QMainWindow):
         self.horizontal_scroll = QScrollBar(Qt.Horizontal)
         self.vertical_scroll = QScrollBar(Qt.Vertical)
         self.title_label = QLabel(self.WINDOW_TITLE)
-        self.title_logo_label = QLabel()
 
         self._is_syncing_scrollbars = False
         self._directory_load_timer = QTimer(self)
@@ -201,27 +200,13 @@ class MainWindow(QMainWindow):
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.title_label.setFixedHeight(64)
 
-        self.title_logo_label.setFixedSize(54, 54)
-        self.title_logo_label.setAlignment(Qt.AlignCenter)
-        logo_path = self._resolve_logo_path()
-        if logo_path is not None:
-            pixmap = QPixmap(str(logo_path))
-            if not pixmap.isNull():
-                self.title_logo_label.setPixmap(
-                    pixmap.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-
         title_row = QWidget()
         title_row_layout = QHBoxLayout(title_row)
         title_row_layout.setContentsMargins(0, 0, 0, 0)
         title_row_layout.setSpacing(6)
-        title_row_layout.addWidget(self.title_logo_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
         title_row_layout.addStretch(1)
         title_row_layout.addWidget(self.title_label, 0, Qt.AlignCenter)
         title_row_layout.addStretch(1)
-        right_spacer = QWidget()
-        right_spacer.setFixedSize(54, 54)
-        title_row_layout.addWidget(right_spacer, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         tab1_panel = QWidget()
         tab1_layout = QHBoxLayout(tab1_panel)

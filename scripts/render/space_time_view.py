@@ -97,6 +97,11 @@ class SpaceTimeView(QWidget):
         self.plot_widget.setLabel("bottom", "Time")
         style_axis(self.plot_widget.getAxis("left"), axis_font, label_font)
         style_axis(self.plot_widget.getAxis("bottom"), axis_font, label_font)
+        # Fix the left-axis width so PlotWidget and WaveformPlot stay aligned:
+        # when the visible point range grows (e.g. huge point counts), the
+        # Point Index tick labels get wider and would otherwise shift the
+        # lower plot area to the right of the waveform plot.
+        self.plot_widget.getAxis("left").setWidth(96)
 
         self.image_item = pg.ImageItem(axisOrder="row-major")
         self.plot_widget.addItem(self.image_item)
@@ -119,6 +124,9 @@ class SpaceTimeView(QWidget):
         self.waveform_plot.setTitle("指定位置点时域波形", color=AXIS_TEXT_COLOR)
         style_axis(self.waveform_plot.getAxis("left"), axis_font, label_font)
         style_axis(self.waveform_plot.getAxis("bottom"), axis_font, label_font)
+        # Same fixed left-axis width as the space-time plot to keep the two
+        # subplot time axes aligned on the left edge.
+        self.waveform_plot.getAxis("left").setWidth(96)
         self.waveform_plot.getViewBox().setMouseEnabled(x=True, y=True)
         self.waveform_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.waveform_curve = self.waveform_plot.plot(pen=pg.mkPen(color="#0f5ea8", width=1.8))
