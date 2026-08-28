@@ -130,8 +130,8 @@ class ChannelAnalysisView(QWidget):
         self.plot_button = QPushButton("绘制")
 
         ui_font = QFont("Times New Roman", 10)
-        axis_font = QFont("Times New Roman", 16)
-        label_font = QFont("Times New Roman", 16)
+        axis_font = QFont("Times New Roman", 18)
+        label_font = QFont("Times New Roman", 18)
         for widget in [
             self.channels_edit,
             self.psd_nperseg_edit,
@@ -550,8 +550,8 @@ class FkSpectrumView(QWidget):
         self.plot_button = QPushButton("绘制 f-k 谱")
 
         ui_font = QFont("Times New Roman", 10)
-        axis_font = QFont("Times New Roman", 16)
-        label_font = QFont("Times New Roman", 16)
+        axis_font = QFont("Times New Roman", 18)
+        label_font = QFont("Times New Roman", 18)
         for widget in [
             self.channel_range_edit,
             self.spacing_edit,
@@ -754,8 +754,8 @@ class TimeFrequencyAnalysisView(QWidget):
         self.plot_button = QPushButton("绘制时频图")
 
         ui_font = QFont("Times New Roman", 10)
-        axis_font = QFont("Times New Roman", 16)
-        label_font = QFont("Times New Roman", 16)
+        axis_font = QFont("Times New Roman", 18)
+        label_font = QFont("Times New Roman", 18)
         compact_edits = [
             self.channel_edit, self.low_cut_edit, self.high_cut_edit,
             self.window_seconds_edit, self.visible_window_seconds_edit,

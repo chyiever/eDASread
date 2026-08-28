@@ -6,6 +6,7 @@ import math
 from datetime import datetime, timedelta
 
 import pyqtgraph as pg
+from PyQt5.QtGui import QFont, QFontMetrics
 
 
 def seconds_to_label(value: float) -> str:
@@ -29,6 +30,31 @@ class TimeAxisItem(pg.AxisItem):
     def set_reference_time(self, reference_time: datetime | None) -> None:
         """Set the acquisition start time for wall-clock tick labels."""
         self._reference_time = reference_time
+
+    def tickSpacing(self, minVal, maxVal, size):  # noqa: N802
+        """Return tick spacing that never lets adjacent labels overlap.
+
+        Time labels have a fixed wide format (HH:MM:SS.mmm) that PyQtGraph's
+        default fill-limit does not account for, so zooming in could produce
+        many closely packed major ticks whose labels overlap. We scale the
+        default spacing so that the smallest major-tick gap is at least as
+        wide as one label.
+        """
+        levels = super().tickSpacing(minVal, maxVal, size)
+        if not levels:
+            return levels
+        dif = abs(maxVal - minVal)
+        if dif <= 0 or size <= 0:
+            return levels
+        font = self.style.get("tickFont")
+        metrics = QFontMetrics(font) if font is not None else QFontMetrics(QFont())
+        label_width = metrics.horizontalAdvance(seconds_to_label(999999.0)) + 10
+        major, offset = levels[0]
+        min_major = label_width * dif / size
+        if major >= min_major:
+            return levels
+        factor = min_major / major
+        return [(spacing * factor, off) for spacing, off in levels]
 
     def tickStrings(self, values, scale, spacing):  # noqa: N802
         if self._reference_time is None:

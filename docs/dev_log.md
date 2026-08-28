@@ -898,3 +898,32 @@ python -m py_compile scripts\ui\main_window.py scripts\render\space_time_view.py
   - 上方波形图与下方 time-space 图 ViewBox 场景矩形均为 `x=97.0, width=946.5`，x 起点与宽度精确一致；
   - 两者左轴 `fixedWidth=96`。
 - 离屏 `MainWindow` 检查：`hasattr(window, 'title_logo_label')` 为 `False`（标题栏 logo 已移除）；`window.windowIcon()` 与 `app.windowIcon()` 均非空（最小化/任务栏图标保留）。
+
+### 2026-08-29 修复刻度标签重叠 + 统一各 Tab 刻度/标签字号为 18
+
+#### 需求
+
+- 放大波形（所有绘图控件的横轴）时，有时会显示特别多的刻度，导致相邻刻度数值文本相互重叠。
+- 四个 Tab 的刻度和标签字号统一调整为 `18`，不加粗。
+
+#### 实现
+
+- **刻度重叠修复（`scripts/render/time_axis.py`）**
+  - 根因：时间轴 `TimeAxisItem` 的自定义标签是固定宽格式 `HH:MM:SS.mmm`（约 12 字符，字号 18 时约 `335 px` 宽）。PyQtGraph 默认按"标签填充轴长比例"（`textFillLimits`）来抑制副层文本，但**主刻度总是绘制且不做间距约束**；放大到较短时间窗口时，主刻度间距可远小于单个标签宽度，导致标签互相重叠。
+  - 修复：在 `TimeAxisItem` 覆写 `tickSpacing()`，先调用父类获得默认间距，再用 `QFontMetrics` 实测最长时间标签宽度，将主刻度及所有刻度层级按 `min_major / major` 的比例放大，使放大后主刻度的最小像素间距恒 `>=` 单个标签宽度 + 余量，从而任何缩放下横轴标签都不重叠；副层刻度线仍保留（无文本的小刻度线），仅文本不再拥挤。
+  - 该修复作用于所有使用 `TimeAxisItem` 的横轴（Tab1 时域/时空图、Tab2 时域图、Tab4 时域/时频图的底部时间轴）。
+- **字号统一为 18（`scripts/render/space_time_view.py`、`scripts/render/analysis_views.py`）**
+  - Tab1（`space_time_view.py`）：`axis_font` 11→18、`label_font` 12→18，并移除 `label_font.setBold(True)`（不加粗）。
+  - Tab2/Tab3/Tab4（`analysis_views.py` 三处）：`axis_font` 与 `label_font` 均由 16→18（本就不加粗）。
+  - 说明：`style_axis` 中 `tickFont=axis_font`（刻度数字）、`axis.label.setFont(label_font)`（轴名标签）；字号增大后自动反馈到 `TimeAxisItem.tickSpacing` 的宽度测量，间距随字号变大而增加。
+
+#### 验证记录
+
+- 语法检查通过：
+```powershell
+python -m py_compile scripts\render\time_axis.py scripts\render\space_time_view.py scripts\render\analysis_views.py
+```
+- 离屏字号检查：Tab1/Tab2/Tab3/Tab4 各轴 `tickFont.pointSize()==18`、不加粗。
+- 离屏刻度重叠检查（`TimeAxisItem`，2000 帧 × 500 Hz、轴实际像素约 946）：
+  - 在 1 s / 0.2 s / 0.05 s 三档时间窗口下，主刻度像素间距均 `>=` 最长标签实测宽度（约 `335 px`），无重叠。
+- 离屏 `MainWindow` 构造检查：4 个页签，Tab1 与 Tab4 轴字号均为 18。

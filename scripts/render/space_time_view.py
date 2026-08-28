@@ -85,9 +85,8 @@ class SpaceTimeView(QWidget):
         self._last_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._tracking_enabled = True
 
-        axis_font = QFont("Times New Roman", 11)
-        label_font = QFont("Times New Roman", 12)
-        label_font.setBold(True)
+        axis_font = QFont("Times New Roman", 18)
+        label_font = QFont("Times New Roman", 18)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": self.time_axis})
