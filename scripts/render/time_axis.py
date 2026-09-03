@@ -29,7 +29,14 @@ class TimeAxisItem(pg.AxisItem):
 
     def set_reference_time(self, reference_time: datetime | None) -> None:
         """Set the acquisition start time for wall-clock tick labels."""
+        if self._reference_time == reference_time:
+            return
         self._reference_time = reference_time
+        # AxisItem caches its rendered picture.  When only the label reference
+        # time changes, the view range may stay identical, so invalidate the
+        # cache explicitly to force tickStrings() to run again.
+        self.picture = None
+        self.update()
 
     def tickSpacing(self, minVal, maxVal, size):  # noqa: N802
         """Return tick spacing that never lets adjacent labels overlap.

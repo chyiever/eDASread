@@ -927,3 +927,21 @@ python -m py_compile scripts\render\time_axis.py scripts\render\space_time_view.
 - 离屏刻度重叠检查（`TimeAxisItem`，2000 帧 × 500 Hz、轴实际像素约 946）：
   - 在 1 s / 0.2 s / 0.05 s 三档时间窗口下，主刻度像素间距均 `>=` 最长标签实测宽度（约 `335 px`），无重叠。
 - 离屏 `MainWindow` 构造检查：4 个页签，Tab1 与 Tab4 轴字号均为 18。
+
+### 2026-09-04 Ctrl 多选文件按时间拼接
+
+- 左侧文件列表启用 `QAbstractItemView.ExtendedSelection`，支持 Ctrl + 鼠标单击和 Shift + 鼠标单击多选当前页文件。
+- `MainWindow` 新增多文件加载链路：
+  - 先对所有选中文件执行 `inspect_bin_file()`；
+  - 按文件名解析出的采集起始时间排序，缺少时间时按文件名兜底；
+  - 校验所有文件采样率和位置点数一致；
+  - 沿 frame/time 方向拼接相位矩阵，再进入原有滤波和绘图流程。
+- 拼接数据复用现有 `current_metadata/current_data` 模型，因此 Tab1、Tab2、Tab3、Tab4、预处理、滚动和点号范围控制继续走同一套逻辑。
+- 状态栏在多选时显示拼接文件数量和总时长。
+- 导出逻辑补充拼接模式处理：多文件拼接后即使未勾选 `Save Filtered Data`，也从当前内存相位矩阵导出，避免错误读取单个源文件。
+
+验证：
+
+```powershell
+python -m py_compile scripts\ui\file_browser.py scripts\ui\main_window.py
+```

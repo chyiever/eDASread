@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QLineEdit,
+    QAbstractItemView,
 )
 
 
@@ -40,6 +41,7 @@ class FileBrowserPanel(QWidget):
         self.sort_combo.addItem("Modified: Oldest", "mtime_asc")
         self.file_list = QListWidget()
         self.file_list.setFont(ui_font)
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.previous_button = QPushButton("Previous 100")
         self.next_button = QPushButton("Next 100")
         self.page_jump_edit = QLineEdit()

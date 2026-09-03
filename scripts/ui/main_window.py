@@ -6,7 +6,7 @@ import re
 import tempfile
 import wave
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 from PyQt5.QtCore import QEvent, Qt, QThreadPool, QTimer
@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         self.current_metadata: Optional[FileMetadata] = None
         self.current_data: Optional[np.ndarray] = None
         self.current_file_path: Optional[Path] = None
+        self.current_file_paths: list[Path] = []
         self.current_filter_config = FilterConfig()
         self.current_preprocess_steps: list[str] = []
         self._active_workers: set[FunctionWorker] = set()
@@ -598,33 +599,90 @@ class MainWindow(QMainWindow):
         index = self.current_page * self.file_browser.PAGE_SIZE + selected_row
         return self.file_paths[index] if 0 <= index < len(self.file_paths) else None
 
+    def _selected_file_paths(self) -> list[Path]:
+        selected_rows = sorted(index.row() for index in self.file_browser.file_list.selectedIndexes())
+        paths: list[Path] = []
+        for row in selected_rows:
+            index = self.current_page * self.file_browser.PAGE_SIZE + row
+            if 0 <= index < len(self.file_paths):
+                paths.append(self.file_paths[index])
+        return paths
+
     def _on_file_selected(self) -> None:
-        file_path = self._selected_file_path()
-        if file_path is None:
+        file_paths = self._selected_file_paths()
+        if not file_paths:
             return
 
-        self._apply_auto_point_limit(file_path=file_path)
+        self._apply_auto_point_limit(file_path=file_paths[0])
         try:
-            self._load_file(file_path, self._build_filter_config())
+            self._load_files(file_paths, self._build_filter_config())
         except Exception as exc:
             self._show_error(str(exc))
 
     def _load_file(self, file_path: Path, filter_config: FilterConfig) -> None:
-        metadata = inspect_bin_file(file_path)
+        self._load_files([file_path], filter_config)
+
+    def _load_files(self, file_paths: Sequence[Path], filter_config: FilterConfig) -> None:
+        if not file_paths:
+            raise ValueError("No file selected.")
+        metadata, source_metadata = self._inspect_file_group(file_paths)
+        self.current_file_paths = [item.file_path for item in source_metadata]
         self._apply_auto_point_limit(metadata=metadata)
         self.statusBar().showMessage(self._build_loading_status_text(metadata))
-        worker = FunctionWorker(self._load_file_data, metadata, filter_config)
+        worker = FunctionWorker(self._load_file_data, metadata, filter_config, source_metadata)
         self._active_workers.add(worker)
         worker.signals.result.connect(self._on_data_loaded)
         worker.signals.error.connect(self._show_error)
         worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
         self.thread_pool.start(worker)
 
-    def _load_file_data(self, metadata: FileMetadata, filter_config: FilterConfig) -> dict:
-        cache_key = (str(metadata.file_path),) + filter_config.cache_key()
+    def _inspect_file_group(self, file_paths: Sequence[Path]) -> tuple[FileMetadata, list[FileMetadata]]:
+        source_metadata = [inspect_bin_file(path) for path in file_paths]
+        source_metadata.sort(key=self._metadata_sort_key)
+        first = source_metadata[0]
+        for metadata in source_metadata[1:]:
+            if metadata.points != first.points:
+                raise ValueError("多选拼接要求所有文件的位置点数一致。")
+            if not np.isclose(metadata.sample_rate_hz, first.sample_rate_hz):
+                raise ValueError("多选拼接要求所有文件的采样率一致。")
+
+        if len(source_metadata) == 1:
+            return first, source_metadata
+
+        frame_count = sum(metadata.frame_count for metadata in source_metadata)
+        file_size_bytes = sum(metadata.file_size_bytes for metadata in source_metadata)
+        synthetic_name = f"{source_metadata[0].file_path.stem}+{len(source_metadata)}files{source_metadata[0].file_path.suffix}"
+        group_metadata = FileMetadata(
+            file_path=source_metadata[0].file_path.with_name(synthetic_name),
+            sample_rate_hz=first.sample_rate_hz,
+            points=first.points,
+            frame_count=frame_count,
+            duration_s=frame_count / first.sample_rate_hz,
+            file_size_bytes=file_size_bytes,
+            start_time=first.start_time,
+        )
+        return group_metadata, source_metadata
+
+    def _metadata_sort_key(self, metadata: FileMetadata) -> tuple:
+        if metadata.start_time is None:
+            return (1, metadata.file_path.name.casefold())
+        return (0, metadata.start_time, metadata.file_path.name.casefold())
+
+    def _load_file_data(
+        self,
+        metadata: FileMetadata,
+        filter_config: FilterConfig,
+        source_metadata: Sequence[FileMetadata],
+    ) -> dict:
+        source_paths = tuple(str(item.file_path) for item in source_metadata)
+        cache_key = source_paths + filter_config.cache_key()
         processed = self.processed_cache.get(cache_key)
         if processed is None:
-            phase_data = read_phase_radians(metadata)
+            if len(source_metadata) == 1:
+                phase_data = read_phase_radians(source_metadata[0])
+            else:
+                chunks = [read_phase_radians(item) for item in source_metadata]
+                phase_data = np.ascontiguousarray(np.concatenate(chunks, axis=0), dtype=np.float32)
             processed = apply_filter(phase_data, metadata.sample_rate_hz, filter_config)
             self.processed_cache.put(cache_key, processed, int(processed.nbytes))
 
@@ -632,6 +690,7 @@ class MainWindow(QMainWindow):
             "metadata": metadata,
             "data": processed,
             "file_path": metadata.file_path,
+            "file_paths": [item.file_path for item in source_metadata],
             "filter_config": filter_config,
         }
 
@@ -639,6 +698,7 @@ class MainWindow(QMainWindow):
         self.current_metadata = payload["metadata"]
         self.current_data = payload["data"]
         self.current_file_path = payload["file_path"]
+        self.current_file_paths = list(payload.get("file_paths", [self.current_file_path]))
         self.current_filter_config = payload["filter_config"]
         self.current_preprocess_steps = []
         self._apply_auto_point_limit(metadata=self.current_metadata)
@@ -649,11 +709,11 @@ class MainWindow(QMainWindow):
 
     def apply_current_settings(self) -> None:
         """Apply filter and display parameters to the currently selected file."""
-        file_path = self._selected_file_path() or self.current_file_path
-        if file_path is None:
+        file_paths = self._selected_file_paths() or self.current_file_paths
+        if not file_paths:
             return
         try:
-            self._load_file(file_path, self._build_filter_config())
+            self._load_files(file_paths, self._build_filter_config())
         except Exception as exc:
             self._show_error(str(exc))
 
@@ -1625,22 +1685,26 @@ class MainWindow(QMainWindow):
         return f"{sample_rate_hz:g}"
 
     def _build_loading_status_text(self, metadata: FileMetadata) -> str:
+        file_count = len(self.current_file_paths) if self.current_file_paths else 1
+        file_label = metadata.file_path.name if file_count <= 1 else f"{file_count} files stitched"
         return (
-            f"Loading {metadata.file_path.name} | "
+            f"Loading {file_label} | "
             f"采样率：{self._format_sample_rate(metadata.sample_rate_hz)}Hz | "
             f"位置点数：{metadata.points} points | "
-            f"单个数据文件时长：{metadata.duration_s:.2f} s"
+            f"数据时长：{metadata.duration_s:.2f} s"
         )
 
     def _update_status_text(self) -> None:
         if self.current_metadata is None or self.current_file_path is None:
             return
+        file_count = len(self.current_file_paths) if self.current_file_paths else 1
+        file_label = self.current_file_path.name if file_count <= 1 else f"{file_count} 个文件按时间拼接"
         self.statusBar().showMessage(
             (
-                f"当前文件：{self.current_file_path.name} | "
+                f"当前文件：{file_label} | "
                 f"采样率：{self._format_sample_rate(self.current_metadata.sample_rate_hz)}Hz | "
                 f"位置点数：{self.current_metadata.points} points | "
-                f"单个数据文件时长：{self.current_metadata.duration_s:.2f} s | "
+                f"数据时长：{self.current_metadata.duration_s:.2f} s | "
                 f"预处理：{self._format_preprocess_steps()}"
             )
         )
@@ -1723,7 +1787,7 @@ class MainWindow(QMainWindow):
         point_slice = slice(point_start - 1, point_end)
         frame_slice = slice(frame_start, frame_end)
 
-        if save_processed:
+        if save_processed or len(self.current_file_paths) > 1:
             if self.current_data is None:
                 raise ValueError("No processed data loaded.")
             export_phase_slice = np.ascontiguousarray(self.current_data[frame_slice, point_slice], dtype=np.float32)
