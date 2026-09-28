@@ -57,6 +57,8 @@ from scripts.processing.filters import apply_filter
 from scripts.processing.time_frequency import compute_time_frequency_map
 from scripts.render.analysis_views import ChannelAnalysisView, FkSpectrumView, TimeFrequencyAnalysisView
 from scripts.render.space_time_view import SpaceTimeView
+from scripts.processing.traffic_trajectory import build_vehicle_energy_image
+from scripts.render.traffic_trajectory_view import TrafficTrajectoryView
 from scripts.ui.control_panel import ControlPanel
 from scripts.ui.file_browser import FileBrowserPanel
 from scripts.workers.tasks import FunctionWorker
@@ -137,12 +139,14 @@ class MainWindow(QMainWindow):
         self.current_data: Optional[np.ndarray] = None
         self.current_file_path: Optional[Path] = None
         self.current_file_paths: list[Path] = []
+        self.loaded_file_paths: list[Path] = []
         self.current_filter_config = FilterConfig()
         self.current_preprocess_steps: list[str] = []
         self._active_workers: set[FunctionWorker] = set()
         self._point_end_manual_override = False
         self._bz_progress_dialog: Optional[QProgressDialog] = None
         self._audio_temp_paths: list[Path] = []
+        self._file_load_generation = 0
 
         self.file_browser = FileBrowserPanel()
         self.control_panel = ControlPanel()
@@ -150,6 +154,8 @@ class MainWindow(QMainWindow):
         self.channel_analysis_view = ChannelAnalysisView()
         self.fk_spectrum_view = FkSpectrumView()
         self.time_frequency_view = TimeFrequencyAnalysisView()
+        self.traffic_trajectory_view = TrafficTrajectoryView()
+        self.traffic_trajectory_view.generate_button.setEnabled(False)
         self.plot_tabs = QTabWidget()
         self.horizontal_scroll = QScrollBar(Qt.Horizontal)
         self.vertical_scroll = QScrollBar(Qt.Vertical)
@@ -160,6 +166,10 @@ class MainWindow(QMainWindow):
         self._directory_load_timer.setSingleShot(True)
         self._directory_load_timer.setInterval(400)
         self._directory_load_timer.timeout.connect(self._load_directory_from_timer)
+        self._file_selection_timer = QTimer(self)
+        self._file_selection_timer.setSingleShot(True)
+        self._file_selection_timer.setInterval(180)
+        self._file_selection_timer.timeout.connect(self._on_file_selected)
         self._parameter_store = ParameterStore()
         self._parameter_save_timer = QTimer(self)
         self._parameter_save_timer.setSingleShot(True)
@@ -227,6 +237,7 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(self.channel_analysis_view, "Tab2 通道时域/PSD")
         self.plot_tabs.addTab(self.fk_spectrum_view, "Tab3 f-k谱")
         self.plot_tabs.addTab(self.time_frequency_view, "Tab4 时域/时频")
+        self.plot_tabs.addTab(self.traffic_trajectory_view, "Tab5 车辆轨迹标记")
         self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
 
         splitter = QSplitter()
@@ -253,7 +264,7 @@ class MainWindow(QMainWindow):
         self.file_browser.next_button.clicked.connect(self.show_next_page)
         self.file_browser.jump_button.clicked.connect(self.jump_to_page)
         self.file_browser.page_jump_edit.returnPressed.connect(self.jump_to_page)
-        self.file_browser.file_list.itemSelectionChanged.connect(self._on_file_selected)
+        self.file_browser.file_list.itemSelectionChanged.connect(self._schedule_file_selection_load)
 
         self.control_panel.apply_button.clicked.connect(self.apply_current_settings)
         self.control_panel.reset_button.clicked.connect(self.reset_controls)
@@ -276,6 +287,7 @@ class MainWindow(QMainWindow):
         self.channel_analysis_view.plot_requested.connect(self.plot_selected_channels)
         self.fk_spectrum_view.plot_requested.connect(self.plot_fk_spectrum)
         self.time_frequency_view.plot_requested.connect(self.plot_time_frequency)
+        self.traffic_trajectory_view.generate_requested.connect(self.generate_traffic_energy_image)
 
         self.space_time_view.view_range_changed.connect(self._sync_scrollbars_to_view)
         self.horizontal_scroll.valueChanged.connect(self._on_horizontal_scroll)
@@ -307,6 +319,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """Persist the latest parameters so they reload on next launch."""
         self._directory_load_timer.stop()
+        self._file_selection_timer.stop()
         self._parameter_save_timer.stop()
         try:
             self._save_parameters()
@@ -608,6 +621,10 @@ class MainWindow(QMainWindow):
                 paths.append(self.file_paths[index])
         return paths
 
+    def _schedule_file_selection_load(self) -> None:
+        """Coalesce the several selection events produced by Ctrl/Shift multi-select."""
+        self._file_selection_timer.start()
+
     def _on_file_selected(self) -> None:
         file_paths = self._selected_file_paths()
         if not file_paths:
@@ -626,13 +643,20 @@ class MainWindow(QMainWindow):
         if not file_paths:
             raise ValueError("No file selected.")
         metadata, source_metadata = self._inspect_file_group(file_paths)
+        self._file_load_generation += 1
+        load_generation = self._file_load_generation
         self.current_file_paths = [item.file_path for item in source_metadata]
+        self.traffic_trajectory_view.generate_button.setEnabled(False)
         self._apply_auto_point_limit(metadata=metadata)
         self.statusBar().showMessage(self._build_loading_status_text(metadata))
-        worker = FunctionWorker(self._load_file_data, metadata, filter_config, source_metadata)
+        worker = FunctionWorker(
+            self._load_file_data, metadata, filter_config, source_metadata, load_generation
+        )
         self._active_workers.add(worker)
         worker.signals.result.connect(self._on_data_loaded)
-        worker.signals.error.connect(self._show_error)
+        worker.signals.error.connect(
+            lambda message, generation=load_generation: self._on_file_load_error(message, generation)
+        )
         worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
         self.thread_pool.start(worker)
 
@@ -673,6 +697,7 @@ class MainWindow(QMainWindow):
         metadata: FileMetadata,
         filter_config: FilterConfig,
         source_metadata: Sequence[FileMetadata],
+        load_generation: int,
     ) -> dict:
         source_paths = tuple(str(item.file_path) for item in source_metadata)
         cache_key = source_paths + filter_config.cache_key()
@@ -692,13 +717,18 @@ class MainWindow(QMainWindow):
             "file_path": metadata.file_path,
             "file_paths": [item.file_path for item in source_metadata],
             "filter_config": filter_config,
+            "load_generation": load_generation,
         }
 
     def _on_data_loaded(self, payload: dict) -> None:
+        if int(payload.get("load_generation", -1)) != self._file_load_generation:
+            return
         self.current_metadata = payload["metadata"]
         self.current_data = payload["data"]
         self.current_file_path = payload["file_path"]
         self.current_file_paths = list(payload.get("file_paths", [self.current_file_path]))
+        self.loaded_file_paths = list(self.current_file_paths)
+        self.traffic_trajectory_view.generate_button.setEnabled(True)
         self.current_filter_config = payload["filter_config"]
         self.current_preprocess_steps = []
         self._apply_auto_point_limit(metadata=self.current_metadata)
@@ -716,6 +746,14 @@ class MainWindow(QMainWindow):
             self._load_files(file_paths, self._build_filter_config())
         except Exception as exc:
             self._show_error(str(exc))
+
+    def _on_file_load_error(self, message: str, load_generation: int) -> None:
+        if load_generation != self._file_load_generation:
+            return
+        self.traffic_trajectory_view.generate_button.setEnabled(
+            self.current_data is not None and self.loaded_file_paths == self.current_file_paths
+        )
+        self._show_error(message)
 
     def run_preprocess_step(self, step: str) -> None:
         """Run one DAS denoising step against the current processed data."""
@@ -982,6 +1020,116 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(f"Tab4 已绘制时域/时频图：Ch {payload['channel']}")
 
+    def generate_traffic_energy_image(self) -> None:
+        """Build the Tab5 vehicle-energy image from the currently stitched files."""
+        if self.current_data is None or self.current_metadata is None:
+            self._show_error("请先在左侧选择一个或多个连续数据文件。")
+            return
+        if self.loaded_file_paths != self.current_file_paths:
+            self._show_error("所选多文件仍在拼接读取中，请等待状态栏显示加载完成后再生成能量图。")
+            return
+        tab = self.traffic_trajectory_view
+        display_mode = str(tab.display_mode_combo.currentData() or "energy")
+        try:
+            channel_start = int(tab.channel_start_edit.text().strip())
+            channel_end = int(tab.channel_end_edit.text().strip())
+            if channel_start > channel_end:
+                channel_start, channel_end = channel_end, channel_start
+            if channel_start < 1 or channel_end > self.current_metadata.points:
+                raise ValueError(f"通道范围必须位于 1-{self.current_metadata.points}。")
+            if display_mode == "energy":
+                low_hz = float(tab.low_cut_edit.text().strip())
+                high_hz = float(tab.high_cut_edit.text().strip())
+                decimation = int(tab.decimation_edit.text().strip())
+        except Exception as exc:
+            self._show_error(str(exc) if str(exc) else "Tab5 参数格式无效。")
+            return
+
+        phase_slice = np.ascontiguousarray(
+            self.current_data[:, channel_start - 1:channel_end], dtype=np.float32
+        )
+        # Use the exact same frames x points matrix already assembled for
+        # Tab1.  Only slice columns here; never concatenate selected channels
+        # or files again in Tab5.  Therefore axis 0 remains the full stitched
+        # time dimension and axis 1 remains channel.
+        source_files = [str(path) for path in self.loaded_file_paths]
+        if display_mode == "phase":
+            tab.set_phase(
+                phase_slice,
+                self.current_metadata.sample_rate_hz,
+                channel_start,
+                source_files,
+                start_time=self.current_metadata.start_time,
+            )
+            self.statusBar().showMessage(
+                f"Tab5 相位图完成：{phase_slice.shape[0]} 帧 × {phase_slice.shape[1]} 通道，"
+                f"{len(source_files)} 个文件按时间拼接。"
+            )
+            return
+
+        options = {
+            "low_hz": low_hz,
+            "high_hz": high_hz,
+            "remove_common_mode": tab.common_mode_checkbox.isChecked(),
+            "decimation": decimation,
+            "balance": tab.balance_combo.currentText(),
+        }
+        tab.generate_button.setEnabled(False)
+        self.statusBar().showMessage(
+            f"Tab5 正在生成能量图：{len(self.current_file_paths) or 1} 个文件，"
+            f"Ch {channel_start}-{channel_end} ..."
+        )
+        worker = FunctionWorker(
+            build_vehicle_energy_image,
+            phase_slice,
+            self.current_metadata.sample_rate_hz,
+            **options,
+        )
+        self._active_workers.add(worker)
+        worker.signals.result.connect(
+            lambda result, start=channel_start, files=source_files,
+            expected_shape=(phase_slice.shape[0] // decimation, phase_slice.shape[1]): self._on_traffic_energy_ready(
+                result, start, files, expected_shape
+            )
+        )
+        worker.signals.error.connect(self._show_error)
+        worker.signals.finished.connect(
+            lambda: tab.generate_button.setEnabled(
+                self.current_data is not None and self.loaded_file_paths == self.current_file_paths
+            )
+        )
+        worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        self.thread_pool.start(worker)
+
+    def _on_traffic_energy_ready(
+        self,
+        result: tuple[np.ndarray, float],
+        channel_start: int,
+        source_files: list[str],
+        expected_shape: tuple[int, int],
+    ) -> None:
+        if source_files != [str(path) for path in self.loaded_file_paths]:
+            self.statusBar().showMessage("Tab5 能量图结果已过期：当前文件已切换。")
+            return
+        energy, energy_rate_hz = result
+        if tuple(energy.shape) != tuple(expected_shape):
+            self._show_error(
+                "Tab5 能量图维度异常："
+                f"期望 time×channel={expected_shape}，实际为 {tuple(energy.shape)}。"
+            )
+            return
+        self.traffic_trajectory_view.set_energy(
+            energy,
+            energy_rate_hz,
+            channel_start,
+            source_files,
+            start_time=self.current_metadata.start_time if self.current_metadata else None,
+        )
+        self.statusBar().showMessage(
+            f"Tab5 能量图完成：{energy.shape[0]} × {energy.shape[1]} 像素，"
+            f"等效采样率 {energy_rate_hz:g} Hz；可开始左键标记轨迹。"
+        )
+
     def play_current_waveform(self) -> None:
         """Play the selected Tab1 waveform channel as scaled audio."""
         if winsound is None:
@@ -1070,6 +1218,7 @@ class MainWindow(QMainWindow):
         tab2 = self.channel_analysis_view
         tab3 = self.fk_spectrum_view
         tab4 = self.time_frequency_view
+        tab5 = self.traffic_trajectory_view
         return {
             "data/browser_folder": self.file_browser.path_edit,
             "tab1/point_start": panel.point_start_edit,
@@ -1122,6 +1271,18 @@ class MainWindow(QMainWindow):
             "tab4/vmax": tab4.vmax_edit,
             "tab4/colormap": tab4.colormap_combo,
             "tab4/auto_color": tab4.auto_color_checkbox,
+            "tab5/channel_start": tab5.channel_start_edit,
+            "tab5/channel_end": tab5.channel_end_edit,
+            "tab5/display_mode": tab5.display_mode_combo,
+            "tab5/low_cut": tab5.low_cut_edit,
+            "tab5/high_cut": tab5.high_cut_edit,
+            "tab5/decimation": tab5.decimation_edit,
+            "tab5/common_mode": tab5.common_mode_checkbox,
+            "tab5/balance": tab5.balance_combo,
+            "tab5/colormap": tab5.colormap_combo,
+            "tab5/vmin": tab5.vmin_edit,
+            "tab5/vmax": tab5.vmax_edit,
+            "tab5/auto_color": tab5.auto_color_checkbox,
         }
 
     def _connect_parameter_autosave(self) -> None:

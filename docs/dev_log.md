@@ -945,3 +945,25 @@ python -m py_compile scripts\render\time_axis.py scripts\render\space_time_view.
 ```powershell
 python -m py_compile scripts\ui\file_browser.py scripts\ui\main_window.py
 ```
+### 2026-09-26 新增 Tab5 交通 DAS 车辆轨迹标记
+
+- 新增 `scripts/processing/traffic_trajectory.py`：实现交通 DAS 带通、去共模、Hilbert 包络、时间块平均降采样、基线扣除和 P99.9/MAD 通道均衡，与参考 notebook 3.2 节一致。
+- 新增 `scripts/render/traffic_trajectory_view.py`：显示能量图，支持逐点构造多条直线/折线、撤销当前点、删除/清空轨迹，以及 JSON/CSV 导出和 JSON 回读。
+- `MainWindow` 新增 `Tab5 车辆轨迹标记`，复用当前多文件拼接数据并在后台线程生成能量图；Tab5 参数纳入跨会话持久化。
+- 标注坐标采用“首帧起算秒数 + 1-based 绝对通道号”，JSON 同时保存源文件列表和能量图等效采样率，方便追溯。
+- 验证：新增模块通过 `py_compile`；合成数据能量图输出非负有限值；Tab5 能完成多点折线标记并生成结构化标注文档；离屏构造确认主窗口含 5 个页签。
+
+### 2026-09-27 Tab4/Tab5 交互与多文件拼接修复
+
+- Tab4 扩充颜色表，并增加 `应用颜色条`，允许不重新计算 STFT 即时修改 Colormap 或手动 VMin/VMax。
+- 修复 Ctrl/Shift 多选文件时每个选择事件都并发加载、旧任务可能覆盖最终拼接结果的问题：选择事件进行 180 ms 合并，每次加载附带递增代次，仅接收最新任务结果。
+- Tab5 明确显示时间和绝对通道坐标轴、刻度及标题，字号与其他分析页一致。
+- Tab5 支持 `Ctrl+Z` 撤销当前轨迹的最后一个选点。
+- 轨迹列表改为复选列表：勾选显示、取消勾选隐藏且不删除；显隐状态写入 JSON，旧版 JSON 默认全部显示。
+- Tab5 增加独立 `HistogramLUTWidget` 能量颜色条、六种 Colormap、颜色自动开关及手动 VMin/VMax；颜色调整不重新计算能量图。
+- Tab5 单独跟踪“请求加载的文件组”和“实际加载完成的文件组”，多文件拼接过程中禁用能量图生成；只有最新文件组完整加载后才重新启用，消除使用上一组 `current_data` 生成能量图的问题。
+- 修正 Tab5 能量矩阵的显示方向：内部数据与多文件拼接均为 `(time, channel)`，而 row-major `ImageItem` 要求 `(y, x)`；显示时改用 `energy.T`，使多个文件沿横轴时间方向连续延长，纵轴对应绝对通道号。坐标范围通过与 Tab1 相同的像素变换映射到完整拼接时长和所选通道范围。
+- 进一步逐项对齐 Tab1：Tab5 不再替换 PlotWidget 的原生 ViewBox，改用场景点击信号完成标点；能量图像采用与 Tab1 相同的 `转置 + QTransform.translate/scale` 坐标映射。左右轴显式创建、显示并预留固定宽高，避免部分 PyQtGraph/Qt 组合中自定义 ViewBox 导致刻度和标题布局空间为零。
+- Tab5 直接从 Tab1 已完成拼接的 `current_data (frames, points)` 仅做通道列切片，不再单独拼接文件；后台结果增加期望 `(frames // decimation, selected_channels)` 维度校验，异常时拒绝显示并报告实际形状。
+- Tab5 新增 `图像类型` 切换：`相位图` 直接复用 Tab1 已完成时间拼接的相位矩阵，并使用 Tab1 相同的时间方向显示降采样；`能量图` 保留带通、去共模、Hilbert 包络、降采样和通道均衡。两种显示模式共用颜色条、坐标轴和人工轨迹标注，选择结果跨会话保存。
+- 修复 Tab5 Colormap 兼容性异常：项目 `COLOR_MAPS` 中的 jet/seismic/hsv 已经是 `pg.ColorMap`，不再误当颜色数组二次构造；解析顺序改为项目映射、PyQtGraph 内置映射、`getFromMatplotlib`、jet 安全回退，兼容缺少 `colors/maps/jet` 文件的旧版 PyQtGraph。

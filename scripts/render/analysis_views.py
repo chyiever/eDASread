@@ -747,10 +747,11 @@ class TimeFrequencyAnalysisView(QWidget):
         self.vmin_edit = QLineEdit()
         self.vmax_edit = QLineEdit()
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(["jet", "hsv", "seismic"])
+        self.colormap_combo.addItems(["jet", "viridis", "inferno", "plasma", "magma", "turbo", "hsv", "seismic"])
         self.colormap_combo.setCurrentText("jet")
         self.auto_color_checkbox = QCheckBox("颜色自动")
         self.auto_color_checkbox.setChecked(True)
+        self.apply_color_button = QPushButton("应用颜色条")
         self.plot_button = QPushButton("绘制时频图")
 
         ui_font = QFont("Times New Roman", 10)
@@ -773,6 +774,7 @@ class TimeFrequencyAnalysisView(QWidget):
         for widget in compact_combos:
             widget.setMaximumWidth(100)
         self.auto_color_checkbox.setFont(ui_font)
+        self.apply_color_button.setFont(ui_font)
         self.plot_button.setFont(ui_font)
         for edit in compact_edits:
             edit.setPlaceholderText("auto")
@@ -798,7 +800,8 @@ class TimeFrequencyAnalysisView(QWidget):
         controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit), 1, 4)
         controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo), 1, 5)
         controls_layout.addWidget(self.auto_color_checkbox, 1, 6)
-        controls_layout.addWidget(self.plot_button, 1, 7)
+        controls_layout.addWidget(self.apply_color_button, 1, 7)
+        controls_layout.addWidget(self.plot_button, 1, 8)
 
         self._metadata: FileMetadata | None = None
         self._channel = 1
@@ -806,6 +809,7 @@ class TimeFrequencyAnalysisView(QWidget):
         self._tf_log_bounds: tuple[float, float] | None = None
         self._active_plot: pg.PlotWidget | None = None
         self._syncing_x_ranges = False
+        self._display_values: np.ndarray | None = None
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.time_plot = pg.PlotWidget(axisItems={"bottom": self.time_axis})
@@ -894,6 +898,8 @@ class TimeFrequencyAnalysisView(QWidget):
         self._active_plot: pg.PlotWidget | None = self.time_plot
 
         self.plot_button.clicked.connect(self.plot_requested)
+        self.apply_color_button.clicked.connect(self.apply_color_controls)
+        self.colormap_combo.currentTextChanged.connect(self._apply_selected_colormap)
         for edit in [
             self.channel_edit,
             self.low_cut_edit,
@@ -945,10 +951,11 @@ class TimeFrequencyAnalysisView(QWidget):
         )
         if display_values.size == 0 or log_freq.size == 0:
             raise ValueError("时频图没有可显示的正频率数据。")
+        self._display_values = display_values
 
         self._tf_log_bounds = (float(log_freq[0]), float(log_freq[-1]))
         self.tf_image_item.setImage(display_values, autoLevels=False)
-        color_map = COLOR_MAPS.get(colormap_name.lower(), COLOR_MAPS["jet"])
+        color_map = self._resolve_colormap(colormap_name)
         self.tf_image_item.setColorMap(color_map)
         self.histogram_widget.gradient.setColorMap(color_map)
         if value_scale.strip().lower() == "log":
@@ -1111,6 +1118,36 @@ class TimeFrequencyAnalysisView(QWidget):
                 raise ValueError("时频图颜色范围需要满足 VMin < VMax。")
         self.tf_image_item.setLevels((level_min, level_max))
         self.histogram_widget.item.setLevels(level_min, level_max)
+
+    @staticmethod
+    def _resolve_colormap(name: str) -> pg.ColorMap:
+        normalized = name.strip().lower() or "jet"
+        if normalized in COLOR_MAPS:
+            return COLOR_MAPS[normalized]
+        try:
+            return pg.colormap.get(normalized)
+        except Exception:
+            return COLOR_MAPS["jet"]
+
+    def _apply_selected_colormap(self, name: str) -> None:
+        color_map = self._resolve_colormap(name)
+        self.tf_image_item.setColorMap(color_map)
+        self.histogram_widget.gradient.setColorMap(color_map)
+
+    def apply_color_controls(self) -> None:
+        """Apply color-map and level edits without recomputing the STFT."""
+        self._apply_selected_colormap(self.colormap_combo.currentText())
+        if self._display_values is None:
+            return
+        auto_levels = self.auto_color_checkbox.isChecked()
+        if auto_levels:
+            levels = (None, None)
+        else:
+            try:
+                levels = (float(self.vmin_edit.text()), float(self.vmax_edit.text()))
+            except ValueError:
+                return
+        self._apply_color_levels(self._display_values, levels, auto_levels)
 
     def _style_plot(self, plot_widget: pg.PlotWidget, axis_font: QFont, label_font: QFont) -> None:
         plot_widget.setBackground("w")
