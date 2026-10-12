@@ -967,3 +967,123 @@ python -m py_compile scripts\ui\file_browser.py scripts\ui\main_window.py
 - Tab5 直接从 Tab1 已完成拼接的 `current_data (frames, points)` 仅做通道列切片，不再单独拼接文件；后台结果增加期望 `(frames // decimation, selected_channels)` 维度校验，异常时拒绝显示并报告实际形状。
 - Tab5 新增 `图像类型` 切换：`相位图` 直接复用 Tab1 已完成时间拼接的相位矩阵，并使用 Tab1 相同的时间方向显示降采样；`能量图` 保留带通、去共模、Hilbert 包络、降采样和通道均衡。两种显示模式共用颜色条、坐标轴和人工轨迹标注，选择结果跨会话保存。
 - 修复 Tab5 Colormap 兼容性异常：项目 `COLOR_MAPS` 中的 jet/seismic/hsv 已经是 `pg.ColorMap`，不再误当颜色数组二次构造；解析顺序改为项目映射、PyQtGraph 内置映射、`getFromMatplotlib`、jet 安全回退，兼容缺少 `colors/maps/jet` 文件的旧版 PyQtGraph。
+
+### 2026-09-29 Tab1 time-space 图 y 轴距离/通道号切换
+
+- `ControlPanel` 新增四个参数：`道间距(m)`、`第一道位置(m)`、`Y轴显示`（通道号/距离）与 `距离单位`（m/km），全部纳入跨会话持久化与 `Reset` 恢复。
+- 新增 `scripts/render/space_time_view.py::DistanceAxisItem`（`pg.AxisItem` 子类）：底层视图坐标保持 1-based 通道号不变（缩放、平移、滚动条、导出逻辑不受影响），仅切换 y 轴刻度位置与标签文本：
+  - 通道号模式：沿用原 `Point Index` 轴。
+  - 距离模式：按 `距离 = 第一道位置 + (通道号-1) × 道间距` 换算；`tickSpacing()` 先把通道区间换算成距离区间取整级刻度，再映射回通道坐标与对齐偏移，使刻度落在整距离上（如 120/125/130 m）；`tickStrings()` 输出 m 或 km 单位标签；轴标签显示为 `Distance (m/km)`。
+  - 例：道间距 2 m、第一道位置 120 m 时，第 2 道对应 122 m，第 10 道对应 138 m。
+- `MainWindow` 新增 `_apply_y_axis_settings()`，在渲染与参数编辑（`textEdited`/`currentTextChanged`）时即时刷新 y 轴；`Y轴显示` 切换为距离时自动启用 `距离单位`。
+- 验证：`py_compile` 通过；离屏合成数据确认通道号/距离(m/km) 三种标签输出正确、刻度落在整距离上、参数持久化可恢复；`smoke_test_parameters.py` 全部通过。
+
+### 2026-09-29 Tab4 时频图 y 轴刻度改为科学计数法
+
+- 时频图 y 轴为 `log10(Hz)` 坐标，原刻度标签显示 `10`、`100`、`1000` 等整数形式。
+- 新增 `_scientific_frequency_label()` 辅助函数，将 decade 格式化为 `10ⁿ` 上标科学计数法（含负指数，如 `10⁻²`）。
+- `LogFrequencyAxis.tickStrings()` 与 `_update_frequency_axis_ticks()` 两处 y 轴标签生成统一使用该格式化函数；非整 decade 的副刻度仍显示空标签。
+- 验证：`py_compile` 通过；离屏检查 decade 标签输出为 `10² / 10³ / 10⁴`，非整 decade 显示空。
+
+### 2026-10-09 同步本地代码并优化各 Tab 参数区布局
+
+#### 第一步：上传最新代码
+
+- 将本地最新改动（Tab1 y 轴“通道号/距离”显示模式、时频图科学计数法刻度等）提交并推送至 `origin/dev`（提交 `fe21f31`）。
+
+#### 第二步：参数区布局优化
+
+- **目标**：参数集中到两行、集中放在 `Apply` 按钮上方；统一各输入框宽度，消除不等宽与冗余宽度。
+
+- **Tab1（`scripts/ui/control_panel.py`）**：
+  - 参数改为 **2 行 × 7 列**的“标签在上、输入框在下”统一网格：
+    - 第 1 行：`Point Start`、`Point End`、`VMin`、`VMax`、`Colormap`、`Y轴显示`、`距离单位`；
+    - 第 2 行：`道间距(m)`、`首道位置(m)`、`滤波`、`低频(Hz)`、`高频(Hz)`、`波形点`。
+  - 数字输入框统一固定宽度 `86 px`、下拉框 `96 px`，每列均分宽度，消除不等宽与冗余拉伸。
+  - `播放波形`按钮并入 `Apply/Reset/Reset View/Back View/Zoom Out 2x` 同一行；`指定位置点时域绘图`标签并入“波形点”单元格。
+  - FK 预处理的 `DX(m)/VMin/VMax` 固定在去噪按钮下方，宽度统一 `80 px`。
+  - 删除不再使用的 `_build_labeled_pair_row`、`_build_multi_widget_row`，新增 `_build_parameter_grid` / `_build_parameter_cell`。
+  - 原参数占 4~5 行，现在两行参数 + 一行按钮 + 一行导出，缩小约 1 行高度。
+
+- **Tab2（`scripts/render/analysis_views.py`）**：`通道` 固定 `180 px`，其余 6 个输入（PSD 窗长/重叠/FMin/FMax/PSD Min/Max）统一 `84 px`；保持原有两行布局。
+
+- **Tab3（`scripts/render/analysis_views.py`）**：由 3 行改为 **2 行 × 7 列**统一网格（`通道范围`、`间距(m)`、`空间taper`、`时间taper`、`NFFT-K`、`NFFT-T`、`扣除背景` / `FMin`、`FMax`、`KMin`、`KMax`、`VMin(dB)`、`VMax(dB)`、`绘制 f-k 谱`）。
+
+- **Tab4**：原本即为两行紧凑布局（输入框 80 px、下拉框 100 px），保持不变。
+
+- **Tab5（`scripts/render/traffic_trajectory_view.py`）**：由 3 行改为 **2 行 × 7 列**统一网格，`应用颜色条`/`生成能量图`并入第 2 行；控件统一设置 `Times New Roman 10pt` 字体与固定宽度。
+
+- 复用原则：3 个文件分别新增模块级/类级 `_uniform_param_cell` / `_build_parameter_cell` 辅助函数，保证同一 Tab 内各输入框等宽、等间距。
+
+#### 第三步：新增参数文档
+
+- 新增 `docs/参数默认值与输入范围.md`：按 Tab 整理全部参数输入框的默认值、允许范围和说明（依据控件校验器与 `main_window.py` 的 `_read_*` 校验逻辑），并注明起止范围类约束在绘制/导出时校验。
+
+#### 验证记录
+
+```powershell
+python -m py_compile scripts\ui\control_panel.py scripts\render\analysis_views.py scripts\render\traffic_trajectory_view.py
+```
+
+- 语法检查通过。
+- 离屏构造检查通过：`ControlPanel`、`ChannelAnalysisView`、`FkSpectrumView`、`TimeFrequencyAnalysisView`、`TrafficTrajectoryView` 与 `MainWindow` 均可正常实例化。
+- 说明：`smoke_test_parameters.py` 在本机离屏环境下存在既有的访问冲突崩溃（改动前的基线同样崩溃，与本批布局改动无关）。
+
+### 2026-10-12 Tab1 多道波形变面积（Wiggle）剖面 + 布局优化文档化
+
+#### 背景 1：界面布局优化文档化（对应上一批布局改动）
+
+- 将此前各 Tab 参数区布局优化整理成 `docs/20261012-GUI布局优化文档.md`：
+  - Tab1 参数两行等宽网格 + Apply 按钮行；
+  - Tab2/Tab3/Tab5 统一输入框宽度；Tab3、Tab5 收为两行；
+  - 记录设计原则（参考 qt-ui-design skill：等宽、统一对齐、就近分组、渐进披露）。
+
+#### 背景 2：新增多道变面积 Wiggle 剖面
+
+- 需求：Tab1 可在 `时空颜色图` 与 `多道波形(Wiggle)` 间切换（默认前者），Wiggle 剖面带振幅缩放、增益、极性、削幅、填充、道抽稀/像素间距与 hover 拾取。
+
+#### 功能变更
+
+- Tab1 参数区新增 `图类型` 下拉框（`时空颜色图` / `多道波形(Wiggle)`）。
+- 新增 `波形变面积参数` 分组（仅在 Wiggle 模式显示）：
+  - `振幅缩放`：全局最大值 / 单道最大值 / 全局均方根 / 单道均方根 / 全局平均值；
+  - `增益(dB)`：-60~60 滑动条 + 数字框同步（`10^(dB/20)`）；
+  - `负向翻转`、`振幅范围`（削幅，0=不限幅）；
+  - `填充` / `负向填充`（变面积黑填充开关与方向）；
+  - `邻道间隔`（`地震道`每 N 道 1 道 / `像素点`基线像素间距）+ `间隔值`。
+
+#### 代码变更
+
+- `scripts/ui/control_panel.py`：
+  - 新增 `图类型` 与 Wiggle 控件、独立分组 `wiggle_group`（默认隐藏）；
+  - 滑块与增益输入框双向同步。
+- `scripts/render/space_time_view.py`：
+  - 新增 `set_plot_mode()` / `set_wiggle_params()` / `_sync_visible_items()` / `_refresh_wiggle()` / `_wiggle_spacing_step()` / `_on_scene_mouse_moved()`；
+  - Wiggle 用三类 `PlotDataItem` 渲染：折线（黑色）、每道基线（灰色 2 点）、变面积填充（`fillLevel=baseline`，Z=-1）；
+  - 折线/填充启用 peak 自动降采样 + clipToView；先在 `addItem` 后再配置 clipToView/降采样，规避 pyqtgraph 0.13.7 瞬时父链导致的 `autoRangeEnabled` AttributeError 噪音；
+  - 道数上限 `MAX_WIGGLE_TRACES=150`，超出自动加步进；
+  - `像素点` 间隔模式按当前 y 轴范围换算通道步进，40ms 节流重建；
+  - `cursor_info` 信号输出 hover 的道号/距离/时间/振幅。
+- `scripts/ui/main_window.py`：
+  - 模式切换与所有 Wiggle 控件即时应用（`textEdited`/`currentTextChanged`/`toggled`/滑块 `valueChanged`）；
+  - 新增持久化键：`tab1/plot_mode`、`tab1/wiggle_scale`、`tab1/wiggle_gain`、`tab1/wiggle_flip`、`tab1/wiggle_clip`、`tab1/wiggle_fill`、`tab1/wiggle_fill_negative`、`tab1/wiggle_spacing_mode`、`tab1/wiggle_spacing_value`；
+  - `Reset` 恢复 Wiggle 全套默认值；`cursor_info` 接到状态栏；
+  - 增益恢复后从持久化文本同步滑块。
+
+#### 文档变更
+
+- 新增 `docs/20261012-波形变面积Wiggle剖面开发文档.md`（需求、交互设计、实现、坐标体系、测试、后续建议）。
+- 新增 `docs/20261012-GUI布局优化文档.md`。
+- 更新 `docs/参数默认值与输入范围.md`：补充 `图类型` 与 Wiggle 参数默认值/范围。
+- 更新 `README.md`：功能列表与 Tab1 小节补充 Wiggle 说明，目录补充新文档。
+
+#### 验证记录
+
+```powershell
+python -m py_compile scripts\ui\control_panel.py scripts\ui\main_window.py scripts\render\space_time_view.py
+```
+
+- 语法检查通过。
+- 离屏单测（synthetic data）17 项断言全部 PASS：模式切换、图像显隐、道抽稀数量、最大道数限制、填充/负向填充开关、增益/翻转/削幅重建、像素间距模式、hover 坐标信号、切回 image。
+- 端到端（合成 `.bin` → `MainWindow` 真实加载链路 → 切 Wiggle）：数据加载、Wiggle item 生成、框选/平移沿用 ViewBox.RectMode、切回颜色图正常。
+- 同步：提交并推送 `origin/dev`。

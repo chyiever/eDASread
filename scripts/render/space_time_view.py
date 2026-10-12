@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QTransform
+from PyQt5.QtGui import QBrush, QColor, QFont, QPen, QTransform
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from scripts.core.models import FileMetadata
@@ -132,6 +132,10 @@ class SpaceTimeView(QWidget):
     """Widget responsible for displaying linked waveform and space-time plots."""
 
     view_range_changed = pyqtSignal(tuple, tuple)
+    cursor_info = pyqtSignal(str)
+
+    WIGGLE_SCALE_MODES = ["全局最大值", "单道最大值", "全局均方根", "单道均方根", "全局平均值"]
+    MAX_WIGGLE_TRACES = 150
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -149,6 +153,20 @@ class SpaceTimeView(QWidget):
         self._default_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._last_view_range: Optional[tuple[tuple[float, float], tuple[float, float]]] = None
         self._tracking_enabled = True
+        self._plot_mode = "image"
+        self._wiggle_items: list[pg.PlotDataItem] = []
+        self._wiggle_fills: list[pg.PlotDataItem] = []
+        self._wiggle_baselines: list[pg.PlotDataItem] = []
+        self._wiggle_params: dict = {
+            "scale_mode": "全局最大值",
+            "gain_db": 0.0,
+            "flip": False,
+            "clip": None,
+            "fill": True,
+            "fill_negative": False,
+            "spacing_mode": "地震道",
+            "spacing_value": 1,
+        }
 
         axis_font = QFont("Times New Roman", 18)
         label_font = QFont("Times New Roman", 18)
@@ -175,12 +193,19 @@ class SpaceTimeView(QWidget):
         self.plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         self.plot_widget.getViewBox().sigRangeChanged.connect(self._emit_view_range_changed)
         self.plot_widget.getViewBox().sigRangeChanged.connect(self._schedule_lod_refresh)
+        self.plot_widget.getViewBox().sigRangeChanged.connect(self._schedule_wiggle_refresh)
         self.plot_widget.getViewBox().sigRangeChangedManually.connect(self._record_manual_view)
+        self.plot_widget.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
 
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(30)
         self._lod_timer.timeout.connect(self._refresh_image_lod)
+
+        self._wiggle_timer = QTimer(self)
+        self._wiggle_timer.setSingleShot(True)
+        self._wiggle_timer.setInterval(40)
+        self._wiggle_timer.timeout.connect(self._refresh_wiggle)
 
         self.waveform_axis = TimeAxisItem(orientation="bottom")
         self.waveform_plot = pg.PlotWidget(axisItems={"bottom": self.waveform_axis})
@@ -276,6 +301,7 @@ class SpaceTimeView(QWidget):
         self._refresh_image(full=True)
         self._update_waveform_curve()
         self.reset_view(clear_history=True)
+        self._sync_visible_items()
 
     def update_waveform_point(self, waveform_point: int) -> None:
         """Update the waveform subplot to show a different point."""
@@ -374,6 +400,185 @@ class SpaceTimeView(QWidget):
     def set_y_range(self, y_min: float, y_max: float) -> None:
         """Update the vertical view range."""
         self.plot_widget.setYRange(y_min, y_max, padding=0.0)
+
+    def set_plot_mode(self, mode: str) -> None:
+        """Switch Tab1 lower plot between the time-space color map and wiggle."""
+        self._plot_mode = "image" if str(mode).strip() == "时空颜色图" else "wiggle"
+        self._sync_visible_items()
+
+    def set_wiggle_params(self, params: dict) -> None:
+        """Update wiggle rendering parameters and refresh immediately."""
+        self._wiggle_params.update(params)
+        if self._plot_mode == "wiggle":
+            self._refresh_wiggle()
+
+    def _sync_visible_items(self) -> None:
+        image_mode = self._plot_mode == "image"
+        self.image_item.setVisible(image_mode)
+        self.histogram_widget.setVisible(image_mode)
+        if image_mode:
+            for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
+                item.setVisible(False)
+        else:
+            self._refresh_wiggle()
+
+    def _schedule_wiggle_refresh(self, *_args) -> None:
+        if self._plot_mode != "wiggle":
+            return
+        if self._wiggle_params.get("spacing_mode") == "像素点" and not self._wiggle_timer.isActive():
+            self._wiggle_timer.start()
+
+    def _wiggle_spacing_step(self) -> int:
+        """Return the channel step between two drawn traces."""
+        params = self._wiggle_params
+        if params.get("spacing_mode") == "像素点":
+            pixels = float(params.get("spacing_value") or 20.0)
+            view_box = self.plot_widget.getViewBox()
+            rect = view_box.viewRect()
+            viewbox_height_px = float(view_box.height())
+            if viewbox_height_px < 100:
+                viewbox_height_px = 600.0
+            y_span = max(rect.height(), 1e-9)
+            channels_per_pixel = y_span / viewbox_height_px
+            return max(1, int(round(pixels * channels_per_pixel)))
+        return max(1, int(round(params.get("spacing_value") or 1)))
+
+    def _refresh_wiggle(self) -> None:
+        """Rebuild the multi-channel wiggle profile from the current slice."""
+        for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
+            self.plot_widget.removeItem(item)
+        self._wiggle_items.clear()
+        self._wiggle_fills.clear()
+        self._wiggle_baselines.clear()
+
+        if self._metadata is None or self._frame_data is None:
+            return
+        if self._plot_mode != "wiggle":
+            return
+
+        params = self._wiggle_params
+        step = self._wiggle_spacing_step()
+        channel_values = np.arange(self._y_start_point, self._y_end_point + 1, step, dtype=int)
+        if channel_values.size == 0:
+            return
+        if channel_values.size > self.MAX_WIGGLE_TRACES:
+            extra = int(np.ceil(channel_values.size / self.MAX_WIGGLE_TRACES)) * step
+            channel_values = np.arange(self._y_start_point, self._y_end_point + 1, extra, dtype=int)
+
+        data = self._frame_data
+        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        matrix = data[:, point_slice]
+        if matrix.size == 0:
+            return
+        slice_abs = np.abs(matrix)
+        slice_amp = np.max(slice_abs)
+        slice_rms = float(np.sqrt(np.mean(np.square(matrix[:: max(1, matrix.shape[0] // 1_000_000)]) if matrix.size > 1_000_000 else matrix)))
+        slice_abs_mean = float(np.mean(slice_abs))
+
+        sample_rate = self._metadata.sample_rate_hz
+        nframes = matrix.shape[0]
+        gain = 10.0 ** (float(params.get("gain_db") or 0.0) / 20.0)
+        flip = bool(params.get("flip"))
+        clip = params.get("clip")
+        fill = bool(params.get("fill"))
+        fill_negative = bool(params.get("fill_negative"))
+        scale_mode = str(params.get("scale_mode") or "全局最大值")
+
+        duration_s = self._metadata.duration_s
+        x_axis_display = [0.0, duration_s]
+
+        black_pen = pg.mkPen(color="#000000", width=1.0)
+        gray_pen = pg.mkPen(color="#9aa0a6", width=0.8)
+        fill_brush = QBrush(QColor("#000000"))
+
+        for channel in channel_values:
+            column = int(channel - self._y_start_point)
+            trace = matrix[:, column]
+            if trace.shape[0] == 0:
+                continue
+            trace_abs = np.abs(trace)
+            trace_max = float(np.max(trace_abs))
+            if scale_mode == "全局最大值":
+                scale = 1.0 / slice_amp if slice_amp > 1e-12 else 1.0
+            elif scale_mode == "单道最大值":
+                scale = 1.0 / trace_max if trace_max > 1e-12 else 1.0
+            elif scale_mode == "全局均方根":
+                scale = 1.0 / slice_rms if slice_rms > 1e-12 else 1.0
+            elif scale_mode == "单道均方根":
+                trace_rms = float(np.sqrt(np.mean(np.square(trace))))
+                scale = 1.0 / trace_rms if trace_rms > 1e-12 else 1.0
+            elif scale_mode == "全局平均值":
+                scale = 1.0 / slice_abs_mean if slice_abs_mean > 1e-12 else 1.0
+            else:
+                scale = 1.0
+
+            scaled = trace.astype(np.float64, copy=False) * scale * gain
+            if flip:
+                scaled = -scaled
+            if clip is not None and clip > 0:
+                np.clip(scaled, -clip, clip, out=scaled)
+
+            baseline = float(channel)
+            x_values = np.arange(nframes, dtype=np.float64) / sample_rate
+            trace_y = baseline + scaled
+
+            trace_item = pg.PlotDataItem(
+                x=x_values,
+                y=np.ascontiguousarray(trace_y),
+                pen=black_pen,
+            )
+            self.plot_widget.addItem(trace_item)
+            trace_item.setDownsampling(auto=True, method="peak")
+            trace_item.setClipToView(True)
+            self._wiggle_items.append(trace_item)
+
+            baseline_item = pg.PlotDataItem(
+                x=x_axis_display,
+                y=[baseline, baseline],
+                pen=gray_pen,
+            )
+            self.plot_widget.addItem(baseline_item)
+            baseline_item.setClipToView(True)
+            self._wiggle_baselines.append(baseline_item)
+
+            if fill:
+                if fill_negative:
+                    fill_y = trace_y
+                else:
+                    fill_y = baseline + np.maximum(scaled, 0.0)
+                fill_item = pg.PlotDataItem(
+                    x=x_values,
+                    y=np.ascontiguousarray(fill_y),
+                    pen=None,
+                    brush=fill_brush,
+                    fillLevel=baseline,
+                )
+                self.plot_widget.addItem(fill_item)
+                fill_item.setDownsampling(auto=True, method="peak")
+                fill_item.setClipToView(True)
+                fill_item.setZValue(-1)
+                self._wiggle_fills.append(fill_item)
+
+    def _on_scene_mouse_moved(self, pos) -> None:
+        """Report (channel, distance, time, amplitude) on hover in wiggle mode."""
+        if self._plot_mode != "wiggle":
+            return
+        if self._metadata is None or self._frame_data is None:
+            return
+        view_point = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
+        channel = int(round(view_point.y()))
+        if channel < 1 or channel > self._frame_data.shape[1]:
+            return
+        clamped_time = min(max(view_point.x(), 0.0), self._metadata.duration_s)
+        frame = int(clamped_time * self._metadata.sample_rate_hz)
+        frame = min(max(frame, 0), self._frame_data.shape[0] - 1)
+        amplitude = float(self._frame_data[frame, channel - 1])
+        spacing_m = getattr(self.distance_axis, "_spacing_m", 5.0) or 5.0
+        first_pos_m = getattr(self.distance_axis, "_first_pos_m", 0.0) or 0.0
+        distance = first_pos_m + (channel - 1) * spacing_m
+        self.cursor_info.emit(
+            f"道号 {channel:g} | 距离 {distance:g} m | 时间 {clamped_time:.3f} s | 振幅 {amplitude:.4g} rad"
+        )
 
     def _update_waveform_curve(self) -> None:
         if self._metadata is None or self._frame_data is None:

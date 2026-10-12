@@ -22,6 +22,27 @@ from scripts.render.time_axis import TimeAxisItem
 from scripts.processing.view_data import MAX_IMAGE_DISPLAY_COLUMNS, downsample_image_for_display
 
 
+def _uniform_param_cell(label_text: str, widget: QWidget, *, width: int | None = None) -> QWidget:
+    """Build a compact label-above-input cell with a uniform input width."""
+    cell = QWidget()
+    layout = QVBoxLayout(cell)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(2)
+
+    label = QLabel(label_text)
+    label.setFont(widget.font())
+    label.setAlignment(Qt.AlignCenter)
+
+    if width is None:
+        width = 110 if isinstance(widget, QComboBox) else 96
+    widget.setFixedWidth(width)
+    widget.setMinimumWidth(width)
+
+    layout.addWidget(label)
+    layout.addWidget(widget, 0, Qt.AlignHCenter)
+    return cell
+
+
 class TrafficTrajectoryView(QWidget):
     """Tab5 controls, energy image, and multi-polyline annotation state."""
 
@@ -45,6 +66,9 @@ class TrafficTrajectoryView(QWidget):
     def _build_ui(self) -> None:
         controls = QGroupBox("交通 DAS 能量图与轨迹标记参数")
         grid = QGridLayout(controls)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
         self.channel_start_edit = QLineEdit("200")
         self.channel_end_edit = QLineEdit("820")
         self.display_mode_combo = QComboBox()
@@ -69,21 +93,46 @@ class TrafficTrajectoryView(QWidget):
         self.auto_color_checkbox.setChecked(True)
         self.apply_color_button = QPushButton("应用颜色条")
         self.generate_button = QPushButton("生成能量图")
-        fields = [
+        for widget in [
+            self.channel_start_edit, self.channel_end_edit, self.low_cut_edit,
+            self.high_cut_edit, self.decimation_edit, self.vmin_edit, self.vmax_edit,
+            self.display_mode_combo, self.balance_combo, self.colormap_combo,
+            self.common_mode_checkbox, self.auto_color_checkbox,
+            self.apply_color_button, self.generate_button,
+        ]:
+            widget.setFont(QFont("Times New Roman", 10))
+        self.auto_color_checkbox.setFixedWidth(110)
+        self.common_mode_checkbox.setFixedWidth(100)
+        self.apply_color_button.setFixedWidth(116)
+        self.generate_button.setFixedWidth(116)
+
+        row_0 = [
             ("图像类型", self.display_mode_combo),
-            ("通道起点(1-based)", self.channel_start_edit), ("通道终点(含)", self.channel_end_edit),
-            ("Low Cut (Hz)", self.low_cut_edit), ("High Cut (Hz)", self.high_cut_edit),
-            ("时间降采样", self.decimation_edit), ("通道均衡", self.balance_combo),
-            ("Colormap", self.colormap_combo), ("VMin", self.vmin_edit),
-            ("VMax", self.vmax_edit), ("颜色范围", self.auto_color_checkbox),
-            ("预处理", self.common_mode_checkbox),
+            ("通道起点", self.channel_start_edit),
+            ("通道终点(含)", self.channel_end_edit),
+            ("低频(Hz)", self.low_cut_edit),
+            ("高频(Hz)", self.high_cut_edit),
+            ("降采样", self.decimation_edit),
+            ("通道均衡", self.balance_combo),
         ]
-        for i, (label, widget) in enumerate(fields):
-            row, col = divmod(i, 4)
-            grid.addWidget(QLabel(label), row, col * 2)
-            grid.addWidget(widget, row, col * 2 + 1)
-        grid.addWidget(self.apply_color_button, 0, 8)
-        grid.addWidget(self.generate_button, 1, 8)
+        row_1 = [
+            ("Colormap", self.colormap_combo),
+            ("VMin", self.vmin_edit),
+            ("VMax", self.vmax_edit),
+        ]
+        row_1_actions = [
+            self.auto_color_checkbox,
+            self.common_mode_checkbox,
+            self.apply_color_button,
+            self.generate_button,
+        ]
+        for col, (label_text, widget) in enumerate(row_0):
+            grid.addWidget(_uniform_param_cell(label_text, widget), 0, col)
+        for col, (label_text, widget) in enumerate(row_1):
+            grid.addWidget(_uniform_param_cell(label_text, widget), 1, col)
+        for col, widget in enumerate(row_1_actions, start=len(row_1)):
+            grid.addWidget(widget, 1, col)
+        grid.setColumnStretch(len(row_1) + len(row_1_actions), 1)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.channel_axis = pg.AxisItem(orientation="left")

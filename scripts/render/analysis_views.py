@@ -45,6 +45,32 @@ CURVE_COLORS = [
 ]
 
 
+def _uniform_param_cell(
+    label_text: str,
+    widget: QWidget,
+    *,
+    width: int | None = None,
+) -> QWidget:
+    """Build a compact label-above-input cell with a uniform input width."""
+    cell = QWidget()
+    layout = QVBoxLayout(cell)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(2)
+
+    label = QLabel(label_text)
+    label.setFont(widget.font())
+    label.setAlignment(Qt.AlignCenter)
+
+    if width is None:
+        width = 110 if isinstance(widget, QComboBox) else 88
+    widget.setFixedWidth(width)
+    widget.setMinimumWidth(width)
+
+    layout.addWidget(label)
+    layout.addWidget(widget, 0, Qt.AlignHCenter)
+    return cell
+
+
 class TimeSelectionViewBox(pg.ViewBox):
     """ViewBox that supports Ctrl+left-drag time-range selection.
 
@@ -147,7 +173,16 @@ class ChannelAnalysisView(QWidget):
         self.psd_fmax_edit.setPlaceholderText("auto")
         self.psd_ymin_edit.setPlaceholderText("auto")
         self.psd_ymax_edit.setPlaceholderText("auto")
-
+        self.channels_edit.setFixedWidth(180)
+        for edit in [
+            self.psd_nperseg_edit,
+            self.psd_overlap_edit,
+            self.psd_fmin_edit,
+            self.psd_fmax_edit,
+            self.psd_ymin_edit,
+            self.psd_ymax_edit,
+        ]:
+            edit.setFixedWidth(84)
         controls = QGroupBox("通道分析")
         controls.setFont(ui_font)
         controls_layout = QGridLayout(controls)
@@ -577,21 +612,34 @@ class FkSpectrumView(QWidget):
         controls_layout = QGridLayout(controls)
         controls_layout.setContentsMargins(8, 8, 8, 8)
         controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(6)
-        controls_layout.addWidget(self._labeled_widget("通道范围", self.channel_range_edit), 0, 0, 1, 2)
-        controls_layout.addWidget(self._labeled_widget("间距(m)", self.spacing_edit), 0, 2)
-        controls_layout.addWidget(self._labeled_widget("空间taper", self.spatial_taper_edit), 0, 3)
-        controls_layout.addWidget(self._labeled_widget("时间taper", self.temporal_taper_edit), 0, 4)
-        controls_layout.addWidget(self._labeled_widget("NFFT-K", self.nfft_channels_edit), 1, 0)
-        controls_layout.addWidget(self._labeled_widget("NFFT-T", self.nfft_samples_edit), 1, 1)
-        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit), 1, 2)
-        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit), 1, 3)
-        controls_layout.addWidget(self.remove_bg_checkbox, 1, 4)
-        controls_layout.addWidget(self._labeled_widget("KMin", self.kmin_edit), 2, 0)
-        controls_layout.addWidget(self._labeled_widget("KMax", self.kmax_edit), 2, 1)
-        controls_layout.addWidget(self._labeled_widget("VMin(dB)", self.vmin_db_edit), 2, 2)
-        controls_layout.addWidget(self._labeled_widget("VMax(dB)", self.vmax_db_edit), 2, 3)
-        controls_layout.addWidget(self.plot_button, 2, 4)
+        controls_layout.setVerticalSpacing(4)
+
+        self.remove_bg_checkbox.setFixedWidth(100)
+        self.plot_button.setFixedWidth(110)
+
+        row_0 = [
+            ("通道范围", self.channel_range_edit),
+            ("间距(m)", self.spacing_edit),
+            ("空间taper", self.spatial_taper_edit),
+            ("时间taper", self.temporal_taper_edit),
+            ("NFFT-K", self.nfft_channels_edit),
+            ("NFFT-T", self.nfft_samples_edit),
+        ]
+        row_1 = [
+            ("FMin", self.fmin_edit),
+            ("FMax", self.fmax_edit),
+            ("KMin", self.kmin_edit),
+            ("KMax", self.kmax_edit),
+            ("VMin(dB)", self.vmin_db_edit),
+            ("VMax(dB)", self.vmax_db_edit),
+        ]
+        for col, (label_text, widget) in enumerate(row_0):
+            controls_layout.addWidget(_uniform_param_cell(label_text, widget), 0, col)
+        controls_layout.addWidget(self.remove_bg_checkbox, 0, 6)
+        for col, (label_text, widget) in enumerate(row_1):
+            controls_layout.addWidget(_uniform_param_cell(label_text, widget), 1, col)
+        controls_layout.addWidget(self.plot_button, 1, 6)
+        controls_layout.setColumnStretch(7, 1)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("w")

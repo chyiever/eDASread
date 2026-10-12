@@ -182,6 +182,12 @@ class MainWindow(QMainWindow):
         if "tab1/point_end" in restored_keys:
             # Persisted point range belongs to the user: keep it across files.
             self._point_end_manual_override = True
+        try:
+            self.control_panel.gain_slider.setValue(
+                max(-60, min(60, int(self.control_panel.gain_edit.text() or 0)))
+            )
+        except ValueError:
+            pass
         self._on_waveform_point_changed()
         self.setStyleSheet(self.BUTTON_STYLE)
 
@@ -276,6 +282,16 @@ class MainWindow(QMainWindow):
         self.control_panel.first_trace_pos_edit.textEdited.connect(self._on_y_axis_settings_edited)
         self.control_panel.y_axis_combo.currentTextChanged.connect(self._on_y_axis_mode_changed)
         self.control_panel.distance_unit_combo.currentTextChanged.connect(self._on_y_axis_settings_edited)
+        self.control_panel.display_mode_combo.currentTextChanged.connect(self._on_tab1_plot_mode_changed)
+        self.control_panel.wiggle_scale_combo.currentTextChanged.connect(self._on_wiggle_control_changed)
+        self.control_panel.gain_slider.valueChanged.connect(self._on_wiggle_control_changed)
+        self.control_panel.gain_edit.textEdited.connect(self._on_wiggle_control_changed)
+        self.control_panel.flip_checkbox.toggled.connect(self._on_wiggle_control_changed)
+        self.control_panel.clip_edit.textEdited.connect(self._on_wiggle_control_changed)
+        self.control_panel.fill_checkbox.toggled.connect(self._on_wiggle_control_changed)
+        self.control_panel.fill_negative_checkbox.toggled.connect(self._on_wiggle_control_changed)
+        self.control_panel.spacing_combo.currentTextChanged.connect(self._on_wiggle_control_changed)
+        self.control_panel.spacing_edit.textEdited.connect(self._on_wiggle_control_changed)
         self.control_panel.export_button.clicked.connect(self.export_current_view)
         self.control_panel.point_start_edit.textChanged.connect(self._sync_waveform_point_bounds)
         self.control_panel.point_end_edit.textChanged.connect(self._sync_waveform_point_bounds)
@@ -294,6 +310,7 @@ class MainWindow(QMainWindow):
         self.traffic_trajectory_view.generate_requested.connect(self.generate_traffic_energy_image)
 
         self.space_time_view.view_range_changed.connect(self._sync_scrollbars_to_view)
+        self.space_time_view.cursor_info.connect(self.statusBar().showMessage)
         self.horizontal_scroll.valueChanged.connect(self._on_horizontal_scroll)
         self.vertical_scroll.valueChanged.connect(self._on_vertical_scroll)
 
@@ -1241,6 +1258,15 @@ class MainWindow(QMainWindow):
             "tab1/first_trace_pos": panel.first_trace_pos_edit,
             "tab1/y_axis_mode": panel.y_axis_combo,
             "tab1/distance_unit": panel.distance_unit_combo,
+            "tab1/plot_mode": panel.display_mode_combo,
+            "tab1/wiggle_scale": panel.wiggle_scale_combo,
+            "tab1/wiggle_gain": panel.gain_edit,
+            "tab1/wiggle_flip": panel.flip_checkbox,
+            "tab1/wiggle_clip": panel.clip_edit,
+            "tab1/wiggle_fill": panel.fill_checkbox,
+            "tab1/wiggle_fill_negative": panel.fill_negative_checkbox,
+            "tab1/wiggle_spacing_mode": panel.spacing_combo,
+            "tab1/wiggle_spacing_value": panel.spacing_edit,
             "tab1/export_folder": panel.export_path_edit,
             "tab1/save_filtered": panel.save_filtered_checkbox,
             "tab1/save_as_txt": panel.save_as_txt_checkbox,
@@ -1303,6 +1329,8 @@ class MainWindow(QMainWindow):
                 widget.textEdited.connect(self._schedule_parameter_save)
         # Wheel stepping changes the waveform point without a textEdited event.
         self.control_panel.waveform_point_edit.wheelStepped.connect(self._schedule_parameter_save)
+        # The gain slider mirrors the persisted gain_edit; save on both.
+        self.control_panel.gain_slider.valueChanged.connect(self._schedule_parameter_save)
 
     def _schedule_parameter_save(self, *_args) -> None:
         self._parameter_save_timer.start()
@@ -1606,6 +1634,7 @@ class MainWindow(QMainWindow):
             colormap_name=colormap_name,
         )
         self._apply_y_axis_settings()
+        self._apply_wiggle_settings()
         self._reset_scrollbars_for_current_view()
         self._update_status_text()
 
@@ -1651,6 +1680,15 @@ class MainWindow(QMainWindow):
         self.control_panel.first_trace_pos_edit.setText("0")
         self.control_panel.y_axis_combo.setCurrentText("通道号")
         self.control_panel.distance_unit_combo.setCurrentText("m")
+        self.control_panel.display_mode_combo.setCurrentText("时空颜色图")
+        self.control_panel.wiggle_scale_combo.setCurrentText("全局最大值")
+        self.control_panel.gain_slider.setValue(0)
+        self.control_panel.flip_checkbox.setChecked(False)
+        self.control_panel.clip_edit.setText("0")
+        self.control_panel.fill_checkbox.setChecked(True)
+        self.control_panel.fill_negative_checkbox.setChecked(False)
+        self.control_panel.spacing_combo.setCurrentText("地震道")
+        self.control_panel.spacing_edit.setText("1")
         self._sync_waveform_point_bounds()
         self._schedule_parameter_save()
 
@@ -1866,6 +1904,46 @@ class MainWindow(QMainWindow):
         if self.current_data is None:
             return
         self._apply_y_axis_settings()
+
+    def _on_tab1_plot_mode_changed(self, mode: str) -> None:
+        is_wiggle = str(mode).strip() == "多道波形(Wiggle)"
+        self.control_panel.wiggle_group.setVisible(is_wiggle)
+        if self.current_data is None:
+            return
+        self._apply_wiggle_settings()
+
+    def _on_wiggle_control_changed(self, *_args) -> None:
+        if self.current_data is None:
+            return
+        if self.control_panel.display_mode_combo.currentText().strip() != "多道波形(Wiggle)":
+            return
+        self._apply_wiggle_settings()
+
+    def _apply_wiggle_settings(self) -> None:
+        """Apply Tab1 plot mode and multi-channel wiggle rendering parameters."""
+        mode = self.control_panel.display_mode_combo.currentText().strip()
+        self.space_time_view.set_plot_mode(mode)
+        if mode != "多道波形(Wiggle)":
+            return
+        try:
+            clip_text = self.control_panel.clip_edit.text().strip()
+            clip = float(clip_text) if clip_text else 0.0
+            spacing_text = self.control_panel.spacing_edit.text().strip()
+            spacing_value = float(spacing_text) if spacing_text else 1.0
+        except Exception:
+            return
+        self.space_time_view.set_wiggle_params(
+            {
+                "scale_mode": self.control_panel.wiggle_scale_combo.currentText(),
+                "gain_db": self.control_panel.gain_slider.value(),
+                "flip": self.control_panel.flip_checkbox.isChecked(),
+                "clip": clip if clip > 0 else None,
+                "fill": self.control_panel.fill_checkbox.isChecked(),
+                "fill_negative": self.control_panel.fill_negative_checkbox.isChecked(),
+                "spacing_mode": self.control_panel.spacing_combo.currentText(),
+                "spacing_value": spacing_value,
+            }
+        )
 
     def _on_zoom_out_2x(self) -> None:
         self.space_time_view.zoom_out_horizontal(2.0)
