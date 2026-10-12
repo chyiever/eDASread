@@ -28,6 +28,7 @@ from scipy import signal
 from scripts.core.models import FileMetadata
 from scripts.processing.view_data import robust_abs_percentile, robust_median
 from scripts.processing.time_frequency import build_log_frequency_display_grid
+from scripts.ui.control_panel import format_filter_text, parse_filter_text
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.space_time_view import COLOR_MAPS
 from scripts.render.time_axis import TimeAxisItem
@@ -43,6 +44,40 @@ CURVE_COLORS = [
     "#56b4e9",
     "#7f7f7f",
 ]
+
+
+def parse_float_range_text(text: str):
+    """Parse ``a~b`` into ``(low, high)`` floats; each side may be empty.
+
+    Returns ``(None, None)`` for empty/auto, ``(low, None)`` for ``a~``,
+    ``(None, high)`` for ``~b``.
+    """
+    raw = (text or "").strip().replace("～", "~")
+    if not raw or raw.lower() in ("auto", "none"):
+        return None, None
+    parts = raw.split("~", maxsplit=1)
+    if len(parts) < 2:
+        return None, None
+    values: list[float | None] = []
+    for side in parts:
+        side = side.strip()
+        if not side or side.lower() == "auto":
+            values.append(None)
+        else:
+            try:
+                values.append(float(side))
+            except ValueError:
+                values.append(None)
+    low, high = values
+    if low is not None and high is not None and low > high:
+        low, high = high, low
+    return low, high
+
+
+def _fmt_optional(value) -> str | None:
+    if value is None:
+        return None
+    return f"{value:g}"
 
 
 def _uniform_param_cell(
@@ -173,7 +208,7 @@ class ChannelAnalysisView(QWidget):
         self.psd_fmax_edit.setPlaceholderText("auto")
         self.psd_ymin_edit.setPlaceholderText("auto")
         self.psd_ymax_edit.setPlaceholderText("auto")
-        self.channels_edit.setFixedWidth(180)
+        self.channels_edit.setFixedWidth(150)
         for edit in [
             self.psd_nperseg_edit,
             self.psd_overlap_edit,
@@ -182,7 +217,7 @@ class ChannelAnalysisView(QWidget):
             self.psd_ymin_edit,
             self.psd_ymax_edit,
         ]:
-            edit.setFixedWidth(84)
+            edit.setFixedWidth(72)
         controls = QGroupBox("通道分析")
         controls.setFont(ui_font)
         controls_layout = QHBoxLayout(controls)
@@ -580,6 +615,13 @@ class FkSpectrumView(QWidget):
         self.vmax_db_edit = QLineEdit("0")
         self.plot_button = QPushButton("绘制 f-k 谱")
 
+        self.f_range_edit = QLineEdit("auto~auto")
+        self.k_range_edit = QLineEdit("auto~auto")
+        self.v_range_edit = QLineEdit("-20~0")
+        self.f_range_edit.textChanged.connect(self._sync_merged_ranges)
+        self.k_range_edit.textChanged.connect(self._sync_merged_ranges)
+        self.v_range_edit.textChanged.connect(self._sync_merged_ranges)
+
         ui_font = QFont("Times New Roman", 10)
         axis_font = QFont("Times New Roman", 18)
         label_font = QFont("Times New Roman", 18)
@@ -597,6 +639,9 @@ class FkSpectrumView(QWidget):
             self.kmax_edit,
             self.vmin_db_edit,
             self.vmax_db_edit,
+            self.f_range_edit,
+            self.k_range_edit,
+            self.v_range_edit,
             self.plot_button,
         ]:
             widget.setFont(ui_font)
@@ -610,24 +655,17 @@ class FkSpectrumView(QWidget):
         controls_layout.setSpacing(8)
 
         for edit, width in [
-            (self.channel_range_edit, 96),
-            (self.spacing_edit, 56),
-            (self.spatial_taper_edit, 60),
-            (self.temporal_taper_edit, 60),
-            (self.nfft_channels_edit, 60),
-            (self.nfft_samples_edit, 60),
+            (self.channel_range_edit, 80),
+            (self.spacing_edit, 48),
+            (self.spatial_taper_edit, 50),
+            (self.temporal_taper_edit, 50),
+            (self.nfft_channels_edit, 48),
+            (self.nfft_samples_edit, 48),
         ]:
             edit.setFixedWidth(width)
-        for edit in [
-            self.fmin_edit,
-            self.fmax_edit,
-            self.kmin_edit,
-            self.kmax_edit,
-            self.vmin_db_edit,
-            self.vmax_db_edit,
-        ]:
-            edit.setFixedWidth(64)
-        self.plot_button.setFixedWidth(110)
+        for edit in [self.f_range_edit, self.k_range_edit, self.v_range_edit]:
+            edit.setFixedWidth(104)
+        self.plot_button.setFixedWidth(96)
 
         controls_layout.addWidget(self._labeled_widget("通道范围", self.channel_range_edit))
         controls_layout.addWidget(self._labeled_widget("间距(m)", self.spacing_edit))
@@ -636,12 +674,9 @@ class FkSpectrumView(QWidget):
         controls_layout.addWidget(self._labeled_widget("NFFT-K", self.nfft_channels_edit))
         controls_layout.addWidget(self._labeled_widget("NFFT-T", self.nfft_samples_edit))
         controls_layout.addWidget(self.remove_bg_checkbox)
-        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit))
-        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit))
-        controls_layout.addWidget(self._labeled_widget("KMin", self.kmin_edit))
-        controls_layout.addWidget(self._labeled_widget("KMax", self.kmax_edit))
-        controls_layout.addWidget(self._labeled_widget("VMin(dB)", self.vmin_db_edit))
-        controls_layout.addWidget(self._labeled_widget("VMax(dB)", self.vmax_db_edit))
+        controls_layout.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit))
+        controls_layout.addWidget(self._labeled_widget("K(a~b)", self.k_range_edit))
+        controls_layout.addWidget(self._labeled_widget("V(dB)", self.v_range_edit))
         controls_layout.addWidget(self.plot_button)
         controls_layout.addStretch(1)
 
@@ -757,6 +792,47 @@ class FkSpectrumView(QWidget):
         layout.addWidget(widget, 1)
         return container
 
+    def _sync_merged_ranges(self, *_args) -> None:
+        """Push merged F/K/V range edits into the internal min/max widgets."""
+        f_low, f_high = parse_float_range_text(self.f_range_edit.text())
+        low = _fmt_optional(f_low)
+        high = _fmt_optional(f_high)
+        if low is not None and high is not None:
+            self.fmin_edit.setText(low)
+            self.fmax_edit.setText(high)
+        else:
+            self.fmin_edit.clear()
+            self.fmax_edit.clear()
+
+        k_low, k_high = parse_float_range_text(self.k_range_edit.text())
+        low = _fmt_optional(k_low)
+        high = _fmt_optional(k_high)
+        if low is not None and high is not None:
+            self.kmin_edit.setText(low)
+            self.kmax_edit.setText(high)
+        else:
+            self.kmin_edit.clear()
+            self.kmax_edit.clear()
+
+        v_low, v_high = parse_float_range_text(self.v_range_edit.text())
+        low = _fmt_optional(v_low)
+        high = _fmt_optional(v_high)
+        if low is not None and high is not None:
+            self.vmin_db_edit.setText(low)
+            self.vmax_db_edit.setText(high)
+        else:
+            self.vmin_db_edit.clear()
+            self.vmax_db_edit.clear()
+
+    def refresh_merged_ranges(self) -> None:
+        """Rebuild merged edits from the internal min/max widget values."""
+        def _pair(a: str, b: str) -> str:
+            a, b = a.strip(), b.strip()
+            return f"{a}~{b}" if a and b else "auto~auto"
+        self.f_range_edit.setText(_pair(self.fmin_edit.text(), self.fmax_edit.text()))
+        self.k_range_edit.setText(_pair(self.kmin_edit.text(), self.kmax_edit.text()))
+        self.v_range_edit.setText(_pair(self.vmin_db_edit.text(), self.vmax_db_edit.text()))
+
 
 def _scientific_frequency_label(decade: float) -> str:
     """Format a log10(Hz) decade as scientific notation, e.g. ``10³``."""
@@ -812,6 +888,14 @@ class TimeFrequencyAnalysisView(QWidget):
         self.apply_color_button = QPushButton("应用颜色条")
         self.plot_button = QPushButton("绘制时频图")
 
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("none")
+        self.f_range_edit = QLineEdit("auto~auto")
+        self.v_range_edit = QLineEdit("auto~auto")
+        self.filter_edit.textChanged.connect(self._sync_merged_fields)
+        self.f_range_edit.textChanged.connect(self._sync_merged_fields)
+        self.v_range_edit.textChanged.connect(self._sync_merged_fields)
+
         ui_font = QFont("Times New Roman", 10)
         axis_font = QFont("Times New Roman", 18)
         label_font = QFont("Times New Roman", 18)
@@ -828,14 +912,19 @@ class TimeFrequencyAnalysisView(QWidget):
         for widget in compact_edits + compact_combos:
             widget.setFont(ui_font)
         for widget in compact_edits:
-            widget.setMaximumWidth(80)
+            widget.setMaximumHeight(24)
+            widget.setFixedWidth(64)
         for widget in compact_combos:
-            widget.setMaximumWidth(100)
+            widget.setMaximumHeight(24)
+            widget.setFixedWidth(88)
         self.auto_color_checkbox.setFont(ui_font)
         self.apply_color_button.setFont(ui_font)
         self.plot_button.setFont(ui_font)
         for edit in compact_edits:
             edit.setPlaceholderText("auto")
+        for edit in [self.filter_edit, self.f_range_edit, self.v_range_edit]:
+            edit.setFont(ui_font)
+            edit.setFixedWidth(112)
 
         controls = QGroupBox("Tab4 时域/时频参数")
         controls.setFont(ui_font)
@@ -843,17 +932,13 @@ class TimeFrequencyAnalysisView(QWidget):
         controls_layout.setContentsMargins(6, 4, 6, 4)
         controls_layout.setSpacing(8)
         controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit))
-        controls_layout.addWidget(self._labeled_widget("滤波", self.filter_type_combo))
-        controls_layout.addWidget(self._labeled_widget("Low Cut", self.low_cut_edit))
-        controls_layout.addWidget(self._labeled_widget("High Cut", self.high_cut_edit))
+        controls_layout.addWidget(self._labeled_widget("滤波(A~B)", self.filter_edit))
         controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo))
         controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo))
         controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit))
         controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit))
-        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit))
-        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit))
-        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit))
-        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit))
+        controls_layout.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit))
+        controls_layout.addWidget(self._labeled_widget("V(a~b)", self.v_range_edit))
         controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit))
         controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo))
         controls_layout.addWidget(self.auto_color_checkbox)
@@ -1206,6 +1291,47 @@ class TimeFrequencyAnalysisView(QWidget):
             except ValueError:
                 return
         self._apply_color_levels(self._display_values, levels, auto_levels)
+
+    def _sync_merged_fields(self, *_args) -> None:
+        """Push merged filter/F/V edits into the internal Tab4 widgets."""
+        filter_type, low_hz, high_hz = parse_filter_text(self.filter_edit.text())
+        self.filter_type_combo.setCurrentText(filter_type)
+        self.low_cut_edit.setText(_fmt_optional(low_hz) if low_hz is not None else "")
+        self.high_cut_edit.setText(_fmt_optional(high_hz) if high_hz is not None else "")
+
+        f_low, f_high = parse_float_range_text(self.f_range_edit.text())
+        lo, hi = _fmt_optional(f_low), _fmt_optional(f_high)
+        if lo is not None and hi is not None:
+            self.fmin_edit.setText(lo)
+            self.fmax_edit.setText(hi)
+        else:
+            self.fmin_edit.clear()
+            self.fmax_edit.clear()
+
+        v_low, v_high = parse_float_range_text(self.v_range_edit.text())
+        lo, hi = _fmt_optional(v_low), _fmt_optional(v_high)
+        if lo is not None and hi is not None:
+            self.vmin_edit.setText(lo)
+            self.vmax_edit.setText(hi)
+        else:
+            self.vmin_edit.clear()
+            self.vmax_edit.clear()
+
+    def refresh_merged_fields(self) -> None:
+        """Rebuild merged edits from the internal Tab4 widget values."""
+        filter_type = self.filter_type_combo.currentText().strip().lower()
+        low_text = self.low_cut_edit.text().strip()
+        high_text = self.high_cut_edit.text().strip()
+        low_hz = float(low_text) if low_text else None
+        high_hz = float(high_text) if high_text else None
+        self.filter_edit.setText(format_filter_text(filter_type, low_hz, high_hz))
+
+        def _pair(a: str, b: str) -> str:
+            a, b = a.strip(), b.strip()
+            return f"{a}~{b}" if a and b else "auto~auto"
+
+        self.f_range_edit.setText(_pair(self.fmin_edit.text(), self.fmax_edit.text()))
+        self.v_range_edit.setText(_pair(self.vmin_edit.text(), self.vmax_edit.text()))
 
     def _style_plot(self, plot_widget: pg.PlotWidget, axis_font: QFont, label_font: QFont) -> None:
         plot_widget.setBackground("w")

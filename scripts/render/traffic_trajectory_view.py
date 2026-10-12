@@ -114,20 +114,20 @@ class TrafficTrajectoryView(QWidget):
         ]:
             widget.setFont(QFont("Times New Roman", 10))
         for edit, width in [
-            (self.channel_start_edit, 70),
-            (self.channel_end_edit, 70),
-            (self.low_cut_edit, 60),
-            (self.high_cut_edit, 60),
-            (self.decimation_edit, 60),
-            (self.vmin_edit, 60),
-            (self.vmax_edit, 60),
+            (self.channel_start_edit, 56),
+            (self.channel_end_edit, 56),
+            (self.low_cut_edit, 52),
+            (self.high_cut_edit, 52),
+            (self.decimation_edit, 48),
+            (self.vmin_edit, 48),
+            (self.vmax_edit, 48),
         ]:
             edit.setFixedWidth(width)
-        self.display_mode_combo.setFixedWidth(96)
-        self.balance_combo.setFixedWidth(80)
-        self.colormap_combo.setFixedWidth(96)
-        self.apply_color_button.setFixedWidth(104)
-        self.generate_button.setFixedWidth(104)
+        self.display_mode_combo.setFixedWidth(84)
+        self.balance_combo.setFixedWidth(76)
+        self.colormap_combo.setFixedWidth(84)
+        self.apply_color_button.setFixedWidth(92)
+        self.generate_button.setFixedWidth(92)
 
         row.addWidget(_labeled_pair("图像类型", self.display_mode_combo))
         row.addWidget(_labeled_pair("通道起点", self.channel_start_edit))

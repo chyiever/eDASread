@@ -201,6 +201,10 @@ class ControlPanel(QWidget):
         self.display_mode_combo.addItems(["时空颜色图", "多道波形(Wiggle)"])
         self.display_mode_combo.setCurrentText("时空颜色图")
 
+        self.show_waveform_checkbox = QCheckBox("显示时域图")
+        self.show_waveform_checkbox.setChecked(True)
+        self.show_waveform_checkbox.setToolTip("勾选时显示上方单道时域图；取消勾选时下方图自动占满高度")
+
         self.point_range_edit = QLineEdit("1~100")
         self.color_range_edit = QLineEdit("-0.4~0.4")
         self.filter_edit = QLineEdit("10~")
@@ -303,7 +307,7 @@ class ControlPanel(QWidget):
             self.display_mode_combo,
         ]:
             widget.setFont(ui_font)
-        for checkbox in [self.save_filtered_checkbox, self.save_as_txt_checkbox]:
+        for checkbox in [self.save_filtered_checkbox, self.save_as_txt_checkbox, self.show_waveform_checkbox]:
             checkbox.setFont(ui_font)
 
         point_validator = QIntValidator(0, 100000, self)
@@ -349,18 +353,19 @@ class ControlPanel(QWidget):
 
         param_area = self._build_parameter_grid(
             [
-                ("Point Range", self.point_range_edit, 128),
-                ("Color Range", self.color_range_edit, 128),
-                ("Colormap", self.colormap_combo, 104),
-                ("Y轴显示", self.y_axis_combo, 84),
-                ("距离单位", self.distance_unit_combo, 60),
-                ("图类型", self.display_mode_combo, 148),
+                ("Point Range", self.point_range_edit, 112),
+                ("Color Range", self.color_range_edit, 112),
+                ("Colormap", self.colormap_combo, 96),
+                ("Y轴显示", self.y_axis_combo, 76),
+                ("距离单位", self.distance_unit_combo, 56),
+                ("图类型", self.display_mode_combo, 136),
             ],
             [
-                ("道间距(m)", self.trace_spacing_edit, 70),
-                ("首道位置(m)", self.first_trace_pos_edit, 70),
-                ("滤波(Hz)", self.filter_edit, 128),
-                ("波形点", self.waveform_point_edit, 70),
+                ("道间距(m)", self.trace_spacing_edit, 66),
+                ("首道位置(m)", self.first_trace_pos_edit, 66),
+                ("滤波(Hz)", self.filter_edit, 118),
+                ("波形点", self.waveform_point_edit, 66),
+                ("", self.show_waveform_checkbox, 112),
             ],
         )
 
@@ -392,22 +397,14 @@ class ControlPanel(QWidget):
             edit.setFixedWidth(80)
 
         export_widget = QWidget()
-        export_layout = QVBoxLayout(export_widget)
-        export_layout.setContentsMargins(0, 0, 0, 0)
-        export_layout.setSpacing(4)
-        export_path_row = QHBoxLayout()
-        export_path_row.setSpacing(6)
-        export_path_row.addWidget(self.export_path_edit, 1)
-        export_path_row.addWidget(self.browse_export_button)
-        export_path_row.addWidget(self.export_button)
-        export_layout.addLayout(export_path_row)
-        export_option_row = QHBoxLayout()
-        export_option_row.setContentsMargins(0, 0, 0, 0)
-        export_option_row.setSpacing(12)
-        export_option_row.addWidget(self.save_filtered_checkbox)
-        export_option_row.addWidget(self.save_as_txt_checkbox)
-        export_option_row.addStretch(1)
-        export_layout.addLayout(export_option_row)
+        export_row = QHBoxLayout(export_widget)
+        export_row.setContentsMargins(0, 0, 0, 0)
+        export_row.setSpacing(8)
+        export_row.addWidget(self.export_path_edit, 1)
+        export_row.addWidget(self.browse_export_button)
+        export_row.addWidget(self.export_button)
+        export_row.addWidget(self.save_filtered_checkbox)
+        export_row.addWidget(self.save_as_txt_checkbox)
 
         for button in [*self.action_buttons, *self.denoise_buttons, self.play_waveform_button]:
             button.setMinimumHeight(24)
@@ -447,12 +444,6 @@ class ControlPanel(QWidget):
             self.spacing_edit,
         ]:
             wiggle_widget.setFont(ui_font)
-        for wiggle_checkbox in [
-            self.flip_checkbox,
-            self.fill_checkbox,
-            self.fill_negative_checkbox,
-        ]:
-            wiggle_checkbox.setFixedWidth(110)
         for wiggle_edit in [self.clip_edit, self.spacing_edit]:
             wiggle_edit.setMaximumHeight(24)
             wiggle_edit.setFont(compact_font)
@@ -471,35 +462,33 @@ class ControlPanel(QWidget):
 
         self.wiggle_group = QGroupBox("波形变面积参数")
         self.wiggle_group.setFont(ui_font)
-        wiggle_grid = QGridLayout(self.wiggle_group)
-        wiggle_grid.setContentsMargins(6, 4, 6, 4)
-        wiggle_grid.setHorizontalSpacing(8)
-        wiggle_grid.setVerticalSpacing(4)
+        wiggle_row = QHBoxLayout(self.wiggle_group)
+        wiggle_row.setContentsMargins(6, 4, 6, 4)
+        wiggle_row.setSpacing(8)
 
-        gain_cell = QWidget()
-        gain_cell_layout = QVBoxLayout(gain_cell)
-        gain_cell_layout.setContentsMargins(0, 0, 0, 0)
-        gain_cell_layout.setSpacing(2)
-        gain_label = QLabel("增益(dB)")
-        gain_label.setFont(self.gain_slider.font())
-        gain_label.setAlignment(Qt.AlignCenter)
-        gain_cell_body = QHBoxLayout()
-        gain_cell_body.setSpacing(3)
-        gain_cell_body.addWidget(self.gain_minus_button)
-        gain_cell_body.addWidget(self.gain_slider, 1)
-        gain_cell_body.addWidget(self.gain_plus_button)
-        gain_cell_body.addWidget(self.gain_edit)
-        gain_cell_layout.addWidget(gain_label)
-        gain_cell_layout.addLayout(gain_cell_body)
+        gain_body = QWidget()
+        gain_body_layout = QHBoxLayout(gain_body)
+        gain_body_layout.setContentsMargins(0, 0, 0, 0)
+        gain_body_layout.setSpacing(3)
+        gain_body_layout.addWidget(self.gain_minus_button)
+        gain_body_layout.addWidget(self.gain_slider)
+        gain_body_layout.addWidget(self.gain_plus_button)
+        gain_body_layout.addWidget(self.gain_edit)
 
-        wiggle_grid.addWidget(self._build_parameter_cell("振幅缩放", self.wiggle_scale_combo), 0, 0)
-        wiggle_grid.addWidget(gain_cell, 0, 1)
-        wiggle_grid.addWidget(self.flip_checkbox, 0, 2)
-        wiggle_grid.addWidget(self._build_parameter_cell("振幅范围", self.clip_edit), 0, 3)
-        wiggle_grid.addWidget(self.fill_checkbox, 1, 0)
-        wiggle_grid.addWidget(self.fill_negative_checkbox, 1, 1)
-        wiggle_grid.addWidget(self._build_parameter_cell("邻道间隔", self.spacing_combo), 1, 2)
-        wiggle_grid.addWidget(self._build_parameter_cell("间隔值", self.spacing_edit), 1, 3)
+        self.wiggle_scale_combo.setFixedWidth(130)
+        self.clip_edit.setFixedWidth(66)
+        self.spacing_combo.setFixedWidth(74)
+        self.spacing_edit.setFixedWidth(48)
+
+        wiggle_row.addWidget(self._build_labeled_pair("振幅缩放", self.wiggle_scale_combo, 130))
+        wiggle_row.addWidget(self._build_labeled_pair("增益(dB)", gain_body, 170))
+        wiggle_row.addWidget(self.flip_checkbox)
+        wiggle_row.addWidget(self._build_labeled_pair("振幅范围", self.clip_edit, 66))
+        wiggle_row.addWidget(self.fill_checkbox)
+        wiggle_row.addWidget(self.fill_negative_checkbox)
+        wiggle_row.addWidget(self._build_labeled_pair("邻道间隔", self.spacing_combo, 74))
+        wiggle_row.addWidget(self._build_labeled_pair("间隔值", self.spacing_edit, 48))
+        wiggle_row.addStretch(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -522,7 +511,7 @@ class ControlPanel(QWidget):
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(14)
+        grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(4)
         columns = max((len(row) for row in rows), default=0)
         for row_index, row_items in enumerate(rows):
@@ -541,34 +530,17 @@ class ControlPanel(QWidget):
         row_widget = QWidget()
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
+        row_layout.setSpacing(5)
 
         label = QLabel(label_text)
         label.setFont(widget.font())
-        widget.setFixedWidth(width)
-        widget.setMinimumWidth(width)
+        if width is not None:
+            widget.setFixedWidth(width)
+            widget.setMinimumWidth(width)
 
         row_layout.addWidget(label)
         row_layout.addWidget(widget)
         return row_widget
-
-    def _build_parameter_cell(self, label_text: str, widget: QWidget) -> QWidget:
-        cell = QWidget()
-        layout = QVBoxLayout(cell)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-
-        label = QLabel(label_text)
-        label.setFont(widget.font())
-        label.setAlignment(Qt.AlignCenter)
-
-        fixed_width = 96 if isinstance(widget, QComboBox) else 86
-        widget.setFixedWidth(fixed_width)
-        widget.setMinimumWidth(fixed_width)
-
-        layout.addWidget(label)
-        layout.addWidget(widget, 0, Qt.AlignHCenter)
-        return cell
 
     def _build_triple_input_row(
         self,

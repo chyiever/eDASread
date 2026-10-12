@@ -190,6 +190,9 @@ class MainWindow(QMainWindow):
             )
         except ValueError:
             pass
+        self.space_time_view.set_waveform_visible(self.control_panel.show_waveform_checkbox.isChecked())
+        self.fk_spectrum_view.refresh_merged_ranges()
+        self.time_frequency_view.refresh_merged_fields()
         self._on_waveform_point_changed()
         self.setStyleSheet(self.BUTTON_STYLE)
 
@@ -254,6 +257,12 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([350, 1100])
+        splitter.setHandleWidth(6)
+        splitter.setChildrenCollapsible(False)
+        # Bound the panes so the splitter handle stays freely draggable instead of
+        # being pinned by the parameter strips' (sometimes wide) sizeHint.
+        self.file_browser.setMinimumWidth(240)
+        self.plot_tabs.setMinimumWidth(820)
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -285,6 +294,7 @@ class MainWindow(QMainWindow):
         self.control_panel.y_axis_combo.currentTextChanged.connect(self._on_y_axis_mode_changed)
         self.control_panel.distance_unit_combo.currentTextChanged.connect(self._on_y_axis_settings_edited)
         self.control_panel.display_mode_combo.currentTextChanged.connect(self._on_tab1_plot_mode_changed)
+        self.control_panel.show_waveform_checkbox.toggled.connect(self._on_show_waveform_changed)
         self.control_panel.wiggle_scale_combo.currentTextChanged.connect(self._on_wiggle_control_changed)
         self.control_panel.gain_slider.valueChanged.connect(self._on_wiggle_control_changed)
         self.control_panel.gain_edit.textEdited.connect(self._on_wiggle_control_changed)
@@ -1269,6 +1279,7 @@ class MainWindow(QMainWindow):
             "tab1/y_axis_mode": panel.y_axis_combo,
             "tab1/distance_unit": panel.distance_unit_combo,
             "tab1/plot_mode": panel.display_mode_combo,
+            "tab1/show_waveform": panel.show_waveform_checkbox,
             "tab1/wiggle_scale": panel.wiggle_scale_combo,
             "tab1/wiggle_gain": panel.gain_edit,
             "tab1/wiggle_flip": panel.flip_checkbox,
@@ -1294,25 +1305,18 @@ class MainWindow(QMainWindow):
             "tab3/nfft_channels": tab3.nfft_channels_edit,
             "tab3/nfft_samples": tab3.nfft_samples_edit,
             "tab3/remove_background": tab3.remove_bg_checkbox,
-            "tab3/fmin": tab3.fmin_edit,
-            "tab3/fmax": tab3.fmax_edit,
-            "tab3/kmin": tab3.kmin_edit,
-            "tab3/kmax": tab3.kmax_edit,
-            "tab3/vmin_db": tab3.vmin_db_edit,
-            "tab3/vmax_db": tab3.vmax_db_edit,
+            "tab3/f_range": tab3.f_range_edit,
+            "tab3/k_range": tab3.k_range_edit,
+            "tab3/v_range": tab3.v_range_edit,
             "tab4/channel": tab4.channel_edit,
-            "tab4/filter_type": tab4.filter_type_combo,
-            "tab4/low_cut": tab4.low_cut_edit,
-            "tab4/high_cut": tab4.high_cut_edit,
+            "tab4/filter": tab4.filter_edit,
             "tab4/mode": tab4.tf_mode_combo,
             "tab4/value_scale": tab4.tf_scale_combo,
             "tab4/window_seconds": tab4.window_seconds_edit,
             "tab4/visible_window_seconds": tab4.visible_window_seconds_edit,
             "tab4/overlap_percent": tab4.overlap_percent_edit,
-            "tab4/fmin": tab4.fmin_edit,
-            "tab4/fmax": tab4.fmax_edit,
-            "tab4/vmin": tab4.vmin_edit,
-            "tab4/vmax": tab4.vmax_edit,
+            "tab4/f_range": tab4.f_range_edit,
+            "tab4/v_range": tab4.v_range_edit,
             "tab4/colormap": tab4.colormap_combo,
             "tab4/auto_color": tab4.auto_color_checkbox,
             "tab5/channel_start": tab5.channel_start_edit,
@@ -1689,6 +1693,7 @@ class MainWindow(QMainWindow):
         self.control_panel.y_axis_combo.setCurrentText("通道号")
         self.control_panel.distance_unit_combo.setCurrentText("m")
         self.control_panel.display_mode_combo.setCurrentText("时空颜色图")
+        self.control_panel.show_waveform_checkbox.setChecked(True)
         self.control_panel.wiggle_scale_combo.setCurrentText("全局最大值")
         self.control_panel.gain_slider.setValue(0)
         self.control_panel.flip_checkbox.setChecked(False)
@@ -1921,6 +1926,9 @@ class MainWindow(QMainWindow):
         if self.current_data is None:
             return
         self._apply_wiggle_settings()
+
+    def _on_show_waveform_changed(self, checked: bool) -> None:
+        self.space_time_view.set_waveform_visible(bool(checked))
 
     def _on_wiggle_control_changed(self, *_args) -> None:
         if self.current_data is None:

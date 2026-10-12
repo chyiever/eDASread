@@ -255,8 +255,8 @@ class SpaceTimeView(QWidget):
 
         self.waveform_plot.setXLink(self.plot_widget)
 
-        waveform_row_widget = QWidget()
-        waveform_row_layout = QHBoxLayout(waveform_row_widget)
+        self.waveform_row_widget = QWidget()
+        waveform_row_layout = QHBoxLayout(self.waveform_row_widget)
         waveform_row_layout.setContentsMargins(0, 0, 0, 0)
         waveform_row_layout.setSpacing(6)
         waveform_row_layout.addWidget(self.waveform_plot, 1)
@@ -282,8 +282,12 @@ class SpaceTimeView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(waveform_row_widget, 2)
+        layout.addWidget(self.waveform_row_widget, 2)
         layout.addWidget(lower_row_widget, 6)
+
+    def set_waveform_visible(self, visible: bool) -> None:
+        """Show/hide the single-channel time-domain plot above the main plot."""
+        self.waveform_row_widget.setVisible(bool(visible))
 
     def set_data(
         self,

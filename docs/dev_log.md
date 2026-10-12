@@ -1127,3 +1127,40 @@ python -m py_compile scripts\ui\control_panel.py scripts\ui\main_window.py scrip
 - 离屏单测：三种合并输入解析（含 `5k~20k`、交换/单边/留空）、内部控件双向同步、7 种缩放模式重建、增益 `−`/`+` ±5 dB、负向翻转默认未勾选，全部 PASS；7 次重建平均约 200 ms/次。
 - 端到端：合成 `.bin` 加载 → `滤波 5k~20k` 正确生成 bandpass 配置 → Wiggle 用“三道最大值/增益 12”渲染 → 纵向平移调用 → Reset 恢复合并默认值，全部 PASS。
 - 文档同步：更新 `docs/参数默认值与输入范围.md`、`docs/20261012-GUI布局优化文档.md`、`docs/20261012-波形变面积Wiggle剖面开发文档.md`、`README.md`，并推送 `origin/dev`。
+
+### 2026-10-12 第三轮：布局收尾 + 左侧列表可调 + 新旧 Tab3/Tab4 合并
+
+#### 需求
+
+- 波形变面积所有参数调整为一行。
+- 导出路径框与 `Save Filtered Data` / `Save as txt` 两个勾选框调整为一行。
+- 增加“显示时域图”开关：关闭时上方单道时域图隐藏，下方时空图/多道图自动增大高度。
+- 修复：左侧文件列表宽度无法手动调整、拖拽时闪烁。
+- Tab3/Tab4 参数行过宽导致窗口最小宽度过大，一并压缩（沿用 Tab1 的 `a~b` 合并输入模式）。
+
+#### 变更
+
+- `scripts/ui/control_panel.py`：
+  - `波形变面积参数` 由 2 行改为 **1 行**（振幅缩放 / 增益(−滑块+) / 负向翻转 / 振幅范围 / 填充 / 负向填充 / 邻道间隔 / 间隔值）。
+  - 导出区由 2 行改为 **1 行**：路径输入框 + `Browse Export` + `Export Current View` + `Save Filtered Data` + `Save as txt`。
+  - 新增 `显示时域图` 复选（默认勾选，`tab1/show_waveform` 持久化）。
+- `scripts/ui/main_window.py`：
+  - 连接 `显示时域图` 开关 → `space_time_view.set_waveform_visible()`；Reset 恢复默认勾选。
+  - 修复分栏拖动：为文件浏览区与绘图页设置合理 `minimumWidth`，避免单行参数条的巨大 sizeHint 把窗口/分栏撑死导致拖不动的闪烁。
+- `scripts/render/space_time_view.py`：新增 `set_waveform_visible()`，隐藏时上方时域行收起，下方图自动占满高度。
+- `scripts/render/analysis_views.py`：
+  - Tab3 合并 F/K/V 六项为 `F(a~b)` / `K(a~b)` / `V(dB)`（内部保留 min/max 控件并双向同步），参数行宽度降低。
+  - Tab4 合并 滤波 + Low/High Cut 为 `滤波(A~B)`（复用 Tab1 滤波解析）、FMin/FMax 与 VMin/VMax 为 `F(a~b)` / `V(a~b)`。
+  - Tab4 输入一律固定宽度，消除 QLineEdit 默认 sizeHint 造成的窗口最小宽度虚高。
+- `scripts/render/traffic_trajectory_view.py`：压缩单行参数宽度。
+
+#### 验证记录
+
+```powershell
+python -m py_compile scripts\ui\control_panel.py scripts\ui\main_window.py scripts\render\space_time_view.py scripts\render\analysis_views.py scripts\render\traffic_trajectory_view.py
+```
+
+- 语法检查通过；离屏单测全部 PASS：Wiggle 参数组为单行、导出区为单行、`显示时域图` 开关有效、Tab3/Tab4 合并输入双向同步。
+- 端到端：合成 `.bin` 加载 → Tab4 `滤波 5k~20k` 生成 bandpass 配置、`F(a~b)=10~2000` 正确解析、Tab3 `V(dB)=-30~-5` 正确解析 → `显示时域图` 取消后波形图隐藏/勾选后恢复，全部 PASS。
+- 分栏：为左侧文件列表与右侧绘图页设置最小宽度后，拖动手柄不再被参数条宽度卡死/闪烁。
+- 文档同步：更新 `docs/参数默认值与输入范围.md`、`docs/20261012-GUI布局优化文档.md`、`docs/20261012-波形变面积Wiggle剖面开发文档.md`、`README.md`，并推送 `origin/dev`。
