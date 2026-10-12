@@ -272,6 +272,10 @@ class MainWindow(QMainWindow):
         self.control_panel.back_view_button.clicked.connect(self.space_time_view.back_view)
         self.control_panel.zoom_out_2x_button.clicked.connect(self._on_zoom_out_2x)
         self.control_panel.colormap_combo.currentTextChanged.connect(self._on_colormap_changed)
+        self.control_panel.trace_spacing_edit.textEdited.connect(self._on_y_axis_settings_edited)
+        self.control_panel.first_trace_pos_edit.textEdited.connect(self._on_y_axis_settings_edited)
+        self.control_panel.y_axis_combo.currentTextChanged.connect(self._on_y_axis_mode_changed)
+        self.control_panel.distance_unit_combo.currentTextChanged.connect(self._on_y_axis_settings_edited)
         self.control_panel.export_button.clicked.connect(self.export_current_view)
         self.control_panel.point_start_edit.textChanged.connect(self._sync_waveform_point_bounds)
         self.control_panel.point_end_edit.textChanged.connect(self._sync_waveform_point_bounds)
@@ -1233,6 +1237,10 @@ class MainWindow(QMainWindow):
             "tab1/fk_spacing": panel.fk_spacing_edit,
             "tab1/fk_vmin": panel.fk_vmin_edit,
             "tab1/fk_vmax": panel.fk_vmax_edit,
+            "tab1/trace_spacing": panel.trace_spacing_edit,
+            "tab1/first_trace_pos": panel.first_trace_pos_edit,
+            "tab1/y_axis_mode": panel.y_axis_combo,
+            "tab1/distance_unit": panel.distance_unit_combo,
             "tab1/export_folder": panel.export_path_edit,
             "tab1/save_filtered": panel.save_filtered_checkbox,
             "tab1/save_as_txt": panel.save_as_txt_checkbox,
@@ -1597,8 +1605,27 @@ class MainWindow(QMainWindow):
             vmax=vmax,
             colormap_name=colormap_name,
         )
+        self._apply_y_axis_settings()
         self._reset_scrollbars_for_current_view()
         self._update_status_text()
+
+    def _apply_y_axis_settings(self) -> None:
+        """Apply Tab1 y-axis display mode (channel number or distance)."""
+        try:
+            spacing_m = self._read_positive_float(
+                self.control_panel.trace_spacing_edit, "Tab1 道间距"
+            )
+            first_pos_m = self._read_float(
+                self.control_panel.first_trace_pos_edit, "Tab1 第一道位置"
+            )
+        except Exception:
+            return
+        self.space_time_view.set_y_axis_mode(
+            spacing_m=spacing_m,
+            first_pos_m=first_pos_m,
+            mode=self.control_panel.y_axis_combo.currentText(),
+            unit=self.control_panel.distance_unit_combo.currentText(),
+        )
 
     def reset_controls(self) -> None:
         """Restore display and filter controls to default values."""
@@ -1620,6 +1647,10 @@ class MainWindow(QMainWindow):
         self.control_panel.fk_spacing_edit.setText("5")
         self.control_panel.fk_vmin_edit.setText("800")
         self.control_panel.fk_vmax_edit.setText("1200")
+        self.control_panel.trace_spacing_edit.setText("5")
+        self.control_panel.first_trace_pos_edit.setText("0")
+        self.control_panel.y_axis_combo.setCurrentText("通道号")
+        self.control_panel.distance_unit_combo.setCurrentText("m")
         self._sync_waveform_point_bounds()
         self._schedule_parameter_save()
 
@@ -1824,6 +1855,17 @@ class MainWindow(QMainWindow):
         if self.current_data is None:
             return
         self.space_time_view.update_colormap(colormap_name.strip().lower() or "seismic")
+
+    def _on_y_axis_mode_changed(self, mode: str) -> None:
+        self.control_panel.distance_unit_combo.setEnabled(str(mode).strip() == "距离")
+        if self.current_data is None:
+            return
+        self._apply_y_axis_settings()
+
+    def _on_y_axis_settings_edited(self, *_args) -> None:
+        if self.current_data is None:
+            return
+        self._apply_y_axis_settings()
 
     def _on_zoom_out_2x(self) -> None:
         self.space_time_view.zoom_out_horizontal(2.0)

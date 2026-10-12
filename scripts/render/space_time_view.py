@@ -21,6 +21,71 @@ from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.time_axis import TimeAxisItem
 
 
+class DistanceAxisItem(pg.AxisItem):
+    """Left axis that shows tick labels as physical distance or channel number.
+
+    The underlying view coordinates stay in 1-based channel space (so zoom,
+    pan, scrollbars and export logic are unchanged); only the tick placement
+    and label formatting are switched.  In distance mode the tick positions
+    are chosen so they fall on round distances computed from the trace
+    spacing and the position of the first trace.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._spacing_m = 5.0
+        self._first_pos_m = 0.0
+        self._distance_mode = False
+        self._unit = "m"
+        self.enableAutoSIPrefix(False)
+
+    def configure(self, spacing_m: float, first_pos_m: float, distance_mode: bool, unit: str) -> None:
+        self._spacing_m = float(spacing_m) if float(spacing_m) > 0 else 5.0
+        self._first_pos_m = float(first_pos_m)
+        self._distance_mode = bool(distance_mode)
+        self._unit = unit if unit in ("m", "km") else "m"
+        self.picture = None
+        self.update()
+
+    def _to_distance(self, channel_value: float) -> float:
+        """Distance in metres for a 1-based channel coordinate."""
+        return self._first_pos_m + (channel_value - 1.0) * self._spacing_m
+
+    def _display_value(self, distance_m: float) -> float:
+        return distance_m / 1000.0 if self._unit == "km" else distance_m
+
+    def tickSpacing(self, minVal, maxVal, size):  # noqa: N802
+        if not self._distance_mode or self._spacing_m <= 0:
+            return super().tickSpacing(minVal, maxVal, size)
+        unit_factor = 1000.0 if self._unit == "km" else 1.0
+        dmin = self._to_distance(minVal) / unit_factor
+        dmax = self._to_distance(maxVal) / unit_factor
+        levels = super().tickSpacing(dmin, dmax, size)
+        converted = []
+        for spacing_display, _offset in levels:
+            spacing_dist_m = spacing_display * unit_factor
+            channel_spacing = spacing_dist_m / self._spacing_m
+            anchor_distance = (-self._first_pos_m) % spacing_dist_m
+            channel_offset = 1.0 + anchor_distance / self._spacing_m
+            converted.append((channel_spacing, channel_offset))
+        return converted
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802
+        if not self._distance_mode:
+            return super().tickStrings(values, scale, spacing)
+        labels = []
+        for value in values:
+            if not np.isfinite(value):
+                labels.append("")
+                continue
+            display = self._display_value(self._to_distance(value))
+            if abs(display - round(display)) < 1e-3:
+                labels.append(f"{int(round(display))}")
+            else:
+                labels.append(f"{display:.3g}")
+        return labels
+
+
 def _build_color_map(color_stops: list[tuple[float, tuple[int, int, int]]]) -> pg.ColorMap:
     positions = np.array([stop[0] for stop in color_stops], dtype=float)
     colors = np.array([[r, g, b, 255] for _, (r, g, b) in color_stops], dtype=np.ubyte)
@@ -89,18 +154,21 @@ class SpaceTimeView(QWidget):
         label_font = QFont("Times New Roman", 18)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
-        self.plot_widget = pg.PlotWidget(axisItems={"bottom": self.time_axis})
+        self.distance_axis = DistanceAxisItem(orientation="left")
+        self.plot_widget = pg.PlotWidget(
+            axisItems={"bottom": self.time_axis, "left": self.distance_axis}
+        )
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.15)
         self.plot_widget.setLabel("left", "Point Index")
         self.plot_widget.setLabel("bottom", "Time")
-        style_axis(self.plot_widget.getAxis("left"), axis_font, label_font)
+        style_axis(self.distance_axis, axis_font, label_font)
         style_axis(self.plot_widget.getAxis("bottom"), axis_font, label_font)
         # Fix the left-axis width so PlotWidget and WaveformPlot stay aligned:
         # when the visible point range grows (e.g. huge point counts), the
         # Point Index tick labels get wider and would otherwise shift the
         # lower plot area to the right of the waveform plot.
-        self.plot_widget.getAxis("left").setWidth(96)
+        self.distance_axis.setWidth(96)
 
         self.image_item = pg.ImageItem(axisOrder="row-major")
         self.plot_widget.addItem(self.image_item)
@@ -218,6 +286,26 @@ class SpaceTimeView(QWidget):
         """Update the colormap immediately without reloading file data."""
         self._colormap_name = colormap_name
         self._apply_colormap(colormap_name)
+
+    def set_y_axis_mode(
+        self,
+        spacing_m: float,
+        first_pos_m: float,
+        mode: str,
+        unit: str,
+    ) -> None:
+        """Switch the left axis between channel number and physical distance."""
+        distance_mode = str(mode).strip() == "距离"
+        self.distance_axis.configure(
+            spacing_m=spacing_m,
+            first_pos_m=first_pos_m,
+            distance_mode=distance_mode,
+            unit=unit,
+        )
+        if distance_mode:
+            self.distance_axis.setLabel(text="Distance", units=unit)
+        else:
+            self.distance_axis.setLabel(text="Point Index", units="")
 
     def reset_view(self, clear_history: bool = False) -> None:
         """Reset the view to show the full visible image extent."""

@@ -706,6 +706,13 @@ class FkSpectrumView(QWidget):
         return container
 
 
+def _scientific_frequency_label(decade: float) -> str:
+    """Format a log10(Hz) decade as scientific notation, e.g. ``10³``."""
+    exponent = int(round(decade))
+    superscript_map = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+    return f"10{str(exponent).translate(superscript_map)}"
+
+
 class LogFrequencyAxis(pg.AxisItem):
     """Axis for y values stored as log10(Hz), labelled as real Hz."""
 
@@ -717,8 +724,7 @@ class LogFrequencyAxis(pg.AxisItem):
             if abs(decade - rounded) > 1e-6:
                 labels.append("")
                 continue
-            frequency = 10.0 ** rounded
-            labels.append(f"{frequency:.0f}")
+            labels.append(_scientific_frequency_label(rounded))
         return labels
 
 
@@ -1090,7 +1096,7 @@ class TimeFrequencyAnalysisView(QWidget):
         for decade in range(lo_decade, hi_decade + 1):
             tick = float(decade)
             if y_min <= tick <= y_max:
-                major_ticks.append((tick, f"{10.0 ** decade:.0f}"))
+                major_ticks.append((tick, _scientific_frequency_label(decade)))
             for factor in range(2, 10):
                 sub_tick = decade + float(np.log10(factor))
                 if y_min <= sub_tick <= y_max:

@@ -93,6 +93,15 @@ class ControlPanel(QWidget):
         self.colormap_combo = QComboBox()
         self.colormap_combo.addItems(["jet", "hsv", "seismic"])
         self.colormap_combo.setCurrentText("seismic")
+        self.trace_spacing_edit = QLineEdit("5")
+        self.first_trace_pos_edit = QLineEdit("0")
+        self.y_axis_combo = QComboBox()
+        self.y_axis_combo.addItems(["通道号", "距离"])
+        self.y_axis_combo.setCurrentText("通道号")
+        self.distance_unit_combo = QComboBox()
+        self.distance_unit_combo.addItems(["m", "km"])
+        self.distance_unit_combo.setCurrentText("m")
+        self.distance_unit_combo.setEnabled(False)
 
         self.apply_button = QPushButton("Apply")
         self.reset_button = QPushButton("Reset")
@@ -155,6 +164,10 @@ class ControlPanel(QWidget):
             self.fk_spacing_edit,
             self.fk_vmin_edit,
             self.fk_vmax_edit,
+            self.trace_spacing_edit,
+            self.first_trace_pos_edit,
+            self.y_axis_combo,
+            self.distance_unit_combo,
         ]:
             widget.setFont(ui_font)
         for checkbox in [self.save_filtered_checkbox, self.save_as_txt_checkbox]:
@@ -177,6 +190,8 @@ class ControlPanel(QWidget):
         self.fk_spacing_edit.setValidator(positive_validator)
         self.fk_vmin_edit.setValidator(positive_validator)
         self.fk_vmax_edit.setValidator(positive_validator)
+        self.trace_spacing_edit.setValidator(positive_validator)
+        self.first_trace_pos_edit.setValidator(QDoubleValidator(-1e6, 1e6, 3, self))
 
         for button in [
             *self.action_buttons,
@@ -215,6 +230,12 @@ class ControlPanel(QWidget):
             ("Point Range", point_range_row, 3),
             ("Color Range", color_range_row, 2),
             ("Colormap", self.colormap_combo, 2),
+        )
+        distance_axis_row = self._build_multi_widget_row(
+            ("道间距(m)", self.trace_spacing_edit, 2),
+            ("第一道位置(m)", self.first_trace_pos_edit, 2),
+            ("Y轴显示", self.y_axis_combo, 2),
+            ("距离单位", self.distance_unit_combo, 2),
         )
 
         controls_row_widget = QWidget()
@@ -293,17 +314,20 @@ class ControlPanel(QWidget):
             self.fk_vmin_edit,
             self.fk_vmax_edit,
             self.waveform_point_edit,
+            self.trace_spacing_edit,
+            self.first_trace_pos_edit,
         ]:
             edit.setMaximumHeight(24)
             edit.setFont(compact_font)
 
         main_layout.addWidget(display_row, 0, 0, 1, 2)
-        main_layout.addWidget(controls_row_widget, 1, 0, 1, 2)
-        main_layout.addWidget(filter_row, 2, 0)
-        main_layout.addWidget(waveform_row_widget, 2, 1)
+        main_layout.addWidget(distance_axis_row, 1, 0, 1, 2)
+        main_layout.addWidget(controls_row_widget, 2, 0, 1, 2)
+        main_layout.addWidget(filter_row, 3, 0)
+        main_layout.addWidget(waveform_row_widget, 3, 1)
         main_layout.addWidget(denoise_buttons_row, 0, 2, 2, 1)
-        main_layout.addWidget(denoise_param_row, 2, 2)
-        main_layout.addWidget(export_widget, 3, 0, 1, 3)
+        main_layout.addWidget(denoise_param_row, 3, 2)
+        main_layout.addWidget(export_widget, 4, 0, 1, 3)
         main_layout.setColumnStretch(0, 2)
         main_layout.setColumnStretch(1, 2)
         main_layout.setColumnStretch(2, 1)
@@ -392,4 +416,3 @@ class ControlPanel(QWidget):
         )
         if directory:
             self.export_path_edit.setText(directory)
-
