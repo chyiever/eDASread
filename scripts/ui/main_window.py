@@ -179,9 +179,11 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._connect_parameter_autosave()
         restored_keys = self._restore_persisted_parameters()
-        if "tab1/point_end" in restored_keys:
+        if "tab1/point_range" in restored_keys:
             # Persisted point range belongs to the user: keep it across files.
             self._point_end_manual_override = True
+            self.control_panel.refresh_merged_edits()
+            self._sync_waveform_point_bounds()
         try:
             self.control_panel.gain_slider.setValue(
                 max(-60, min(60, int(self.control_panel.gain_edit.text() or 0)))
@@ -295,7 +297,9 @@ class MainWindow(QMainWindow):
         self.control_panel.export_button.clicked.connect(self.export_current_view)
         self.control_panel.point_start_edit.textChanged.connect(self._sync_waveform_point_bounds)
         self.control_panel.point_end_edit.textChanged.connect(self._sync_waveform_point_bounds)
-        self.control_panel.point_end_edit.textEdited.connect(self._on_point_end_text_edited)
+        self.control_panel.point_range_edit.textEdited.connect(self._on_point_range_text_edited)
+        self.control_panel.color_range_edit.textEdited.connect(self._schedule_parameter_save)
+        self.control_panel.filter_edit.textEdited.connect(self._schedule_parameter_save)
         self.control_panel.waveform_point_edit.editingFinished.connect(self._on_waveform_point_changed)
         self.control_panel.waveform_point_edit.wheelStepped.connect(self._on_waveform_point_wheel_stepped)
         self.control_panel.play_waveform_button.clicked.connect(self.play_current_waveform)
@@ -315,25 +319,35 @@ class MainWindow(QMainWindow):
         self.vertical_scroll.valueChanged.connect(self._on_vertical_scroll)
 
     def eventFilter(self, watched, event):
-        """Allow left/right arrows to drive horizontal scrolling outside text inputs."""
-        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Left, Qt.Key_Right):
+        """Allow arrow keys to drive horizontal/vertical panning."""
+        if event.type() == QEvent.KeyPress and event.key() in (
+            Qt.Key_Left,
+            Qt.Key_Right,
+            Qt.Key_Up,
+            Qt.Key_Down,
+        ):
             focus_widget = QApplication.focusWidget()
             if isinstance(focus_widget, (QLineEdit, QComboBox)):
                 return super().eventFilter(watched, event)
 
-            direction = -1 if event.key() == Qt.Key_Left else 1
+            horizontal = event.key() in (Qt.Key_Left, Qt.Key_Right)
+            direction = -1 if event.key() in (Qt.Key_Left, Qt.Key_Up) else 1
 
-            # Tab2 owns its own keyboard scrolling (the most recently clicked
-            # time/PSD plot), so do not hijack left/right while Tab2 is active.
-            if self.plot_tabs.currentWidget() is self.channel_analysis_view:
-                self.channel_analysis_view.pan_active_plot(direction)
-                return True
-            if self.plot_tabs.currentWidget() is self.time_frequency_view:
-                self.time_frequency_view.pan_active_plot(direction)
+            if horizontal:
+                # Tab2/Tab4 own left/right keyboard scrolling on their plots.
+                if self.plot_tabs.currentWidget() is self.channel_analysis_view:
+                    self.channel_analysis_view.pan_active_plot(direction)
+                    return True
+                if self.plot_tabs.currentWidget() is self.time_frequency_view:
+                    self.time_frequency_view.pan_active_plot(direction)
+                    return True
+                self._step_horizontal_scroll(direction)
                 return True
 
-            self._step_horizontal_scroll(direction)
-            return True
+            # Up/Down: vertical panning on the Tab1 time-space / wiggle plot.
+            if self.plot_tabs.currentIndex() == 0:
+                self._step_vertical_scroll(direction)
+                return True
 
         return super().eventFilter(watched, event)
 
@@ -1242,14 +1256,10 @@ class MainWindow(QMainWindow):
         tab5 = self.traffic_trajectory_view
         return {
             "data/browser_folder": self.file_browser.path_edit,
-            "tab1/point_start": panel.point_start_edit,
-            "tab1/point_end": panel.point_end_edit,
-            "tab1/vmin": panel.vmin_edit,
-            "tab1/vmax": panel.vmax_edit,
+            "tab1/point_range": panel.point_range_edit,
+            "tab1/color_range": panel.color_range_edit,
             "tab1/colormap": panel.colormap_combo,
-            "tab1/filter_type": panel.filter_type_combo,
-            "tab1/low_cut": panel.low_cut_edit,
-            "tab1/high_cut": panel.high_cut_edit,
+            "tab1/filter": panel.filter_edit,
             "tab1/waveform_point": panel.waveform_point_edit,
             "tab1/fk_spacing": panel.fk_spacing_edit,
             "tab1/fk_vmin": panel.fk_vmin_edit,
@@ -1664,12 +1674,10 @@ class MainWindow(QMainWindow):
 
         self.control_panel.point_start_edit.setText("1")
         self.control_panel.point_end_edit.setText(self._default_point_end_value(file_path=selected_file, metadata=metadata))
-        self.control_panel.vmin_edit.setText("-0.4")
-        self.control_panel.vmax_edit.setText("0.4")
+        self.control_panel.refresh_merged_edits()
+        self.control_panel.color_range_edit.setText("-0.4~0.4")
         self.control_panel.colormap_combo.setCurrentText("seismic")
-        self.control_panel.filter_type_combo.setCurrentText("highpass")
-        self.control_panel.low_cut_edit.setText("10")
-        self.control_panel.high_cut_edit.clear()
+        self.control_panel.filter_edit.setText("10~")
         self.control_panel.save_filtered_checkbox.setChecked(False)
         self.control_panel.save_as_txt_checkbox.setChecked(False)
         self.control_panel.waveform_point_edit.setText(self.control_panel.point_start_edit.text().strip() or "1")
@@ -1772,6 +1780,7 @@ class MainWindow(QMainWindow):
             return
         self.control_panel.point_end_edit.setText(self._default_point_end_value(file_path=file_path, metadata=metadata))
         self._sync_waveform_point_bounds()
+        self.control_panel.refresh_merged_edits()
 
     def _clamp_point_range_to_points(self, points: int | None) -> None:
         """Keep the user-owned point range across files; clamp only out-of-range values."""
@@ -1790,6 +1799,7 @@ class MainWindow(QMainWindow):
             self.control_panel.point_start_edit.setText(str(new_start))
         if new_end != end_value:
             self.control_panel.point_end_edit.setText(str(new_end))
+        self.control_panel.refresh_merged_edits()
 
     def _sync_waveform_point_bounds(self) -> None:
         start_text = self.control_panel.point_start_edit.text().strip()
@@ -1803,8 +1813,8 @@ class MainWindow(QMainWindow):
             return
         self.control_panel.set_waveform_point_bounds(start_point, end_point)
 
-    def _on_point_end_text_edited(self, text: str) -> None:
-        self._point_end_manual_override = bool(text.strip())
+    def _on_point_range_text_edited(self, _text: str) -> None:
+        self._point_end_manual_override = True
         self._sync_waveform_point_bounds()
 
     def _on_waveform_point_wheel_stepped(self, _value: int) -> None:
@@ -1958,6 +1968,21 @@ class MainWindow(QMainWindow):
         max_start = max(self.current_metadata.duration_s - span, 0.0)
         new_start = min(max(x_range[0] + delta, 0.0), max_start)
         self.space_time_view.set_x_range(new_start, new_start + span)
+
+    def _step_vertical_scroll(self, direction: int) -> None:
+        """Pan the Tab1 y view in wiggle/space-time plot by a fraction of span."""
+        view = self.space_time_view
+        if view._metadata is None:
+            return
+        _, y_range = view.current_ranges()
+        span = max(y_range[1] - y_range[0], 1e-9)
+        lower = float(view._y_start_point)
+        upper = float(view._y_end_point) + 1.0
+        if span >= (upper - lower):
+            return
+        delta = span * 0.16 * direction
+        new_start = min(max(y_range[0] + delta, lower), upper - span)
+        view.set_y_range(new_start, new_start + span)
 
     def _on_worker_finished(self, worker: FunctionWorker) -> None:
         self._active_workers.discard(worker)

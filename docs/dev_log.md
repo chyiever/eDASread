@@ -1087,3 +1087,43 @@ python -m py_compile scripts\ui\control_panel.py scripts\ui\main_window.py scrip
 - 离屏单测（synthetic data）17 项断言全部 PASS：模式切换、图像显隐、道抽稀数量、最大道数限制、填充/负向填充开关、增益/翻转/削幅重建、像素间距模式、hover 坐标信号、切回 image。
 - 端到端（合成 `.bin` → `MainWindow` 真实加载链路 → 切 Wiggle）：数据加载、Wiggle item 生成、框选/平移沿用 ViewBox.RectMode、切回颜色图正常。
 - 同步：提交并推送 `origin/dev`。
+
+### 2026-10-12 第二轮：Tab1 参数合并压缩 + 多道图交互与性能优化
+
+#### 需求
+
+- Tab1 参数区垂直占用仍偏大：参数名与输入框改为同一行；Point Start/End、VMin/VMax、滤波三组分别合并为单个输入框；Tab2/3/4/5 参数全部调整为一行、保持间距。
+- Wiggle 模式时多道图与上方单道图宽度不一致。
+- 增益滑动条过宽，缩到约 1/6 并增加 `−`/`+` 微调按键。
+- 调整 Wiggle 参数时有 1~2 s 延迟；需优化。
+- 键盘 ↑/↓ 在 Wiggle 模式无响应；需支持纵向平移。
+- 负向翻转默认不勾选（本就是默认，增加回归验证）。
+- 振幅缩放新增 `三道最大值`、`三道均方根` 两种模式。
+
+#### 变更
+
+- `scripts/ui/control_panel.py`：
+  - 新增合并输入框 `Point Range`（`a~b`）、`Color Range`（`a~b`，留空=自动）、`滤波(Hz)`（`A~`高通/`~B`低通/`A~B`带通/`5k~20k`带通）；模块级 `parse_*`/`format_filter_text` 解析。
+  - 保留原分项控件作为内部逻辑载体，`_sync_merged_to_parts()` / `refresh_merged_edits()` 双向同步，主窗口读取逻辑不变。
+  - 参数网格改为“标签-输入框同一行”的 `_build_labeled_pair()`，Tab1 高度显著降低。
+  - 振幅缩放下拉扩为 7 项（含三道最大/三道均方根）；增益滑动条固定 70 px + `−`/`+` 24 px 按钮（±5 dB）+ 48 px 数字框。
+- `scripts/render/space_time_view.py`：
+  - 修复 `slice_rms` 的 `sqrt` 取值告警（`np.square` 分支缺失 + nan 防护）。
+  - 统计改为子采样 nan-safe 计算，并新增“三道”窗口归一化（当前道 ± 相邻道）。
+  - `_decimate_peaks()`：每道先压到 `MAX_WIGGLE_POINTS=4000` 点（min/max 包络），float32 + 共享时间轴，显著降低重建耗时与内存。
+  - `set_wiggle_params()` 改为 40 ms 防抖刷新；`_sync_visible_items()` 在 Wiggle 模式同步隐藏上方时域图右侧 150 px 占位，保证上下两图宽度一致。
+- `scripts/ui/main_window.py`：
+  - 合并输入框接入持久化（`tab1/point_range`/`tab1/color_range`/`tab1/filter`）、Reset 与手动标记逻辑（`_on_point_range_text_edited`）；夹取点范围后调用 `refresh_merged_edits()` 回写。
+  - 新增 `_step_vertical_scroll()`，↑/↓ 在 Tab1 上按 y 可视跨度的 16% 纵向平移（Wiggle/时空图通用）。
+- `scripts/render/analysis_views.py`、`scripts/render/traffic_trajectory_view.py`：Tab2/3/4/5 参数组改为单行（标签-输入框成对，输入框固定等宽），保持间距。
+
+#### 验证记录
+
+```powershell
+python -m py_compile scripts\ui\control_panel.py scripts\ui\main_window.py scripts\render\space_time_view.py scripts\render\analysis_views.py scripts\render\traffic_trajectory_view.py
+```
+
+- 语法检查通过。
+- 离屏单测：三种合并输入解析（含 `5k~20k`、交换/单边/留空）、内部控件双向同步、7 种缩放模式重建、增益 `−`/`+` ±5 dB、负向翻转默认未勾选，全部 PASS；7 次重建平均约 200 ms/次。
+- 端到端：合成 `.bin` 加载 → `滤波 5k~20k` 正确生成 bandpass 配置 → Wiggle 用“三道最大值/增益 12”渲染 → 纵向平移调用 → Reset 恢复合并默认值，全部 PASS。
+- 文档同步：更新 `docs/参数默认值与输入范围.md`、`docs/20261012-GUI布局优化文档.md`、`docs/20261012-波形变面积Wiggle剖面开发文档.md`、`README.md`，并推送 `origin/dev`。

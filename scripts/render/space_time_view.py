@@ -21,6 +21,27 @@ from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.time_axis import TimeAxisItem
 
 
+def _decimate_peaks(values: np.ndarray, max_points: int) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce a trace to ``<= max_points`` samples keeping the min/max envelope.
+
+    Returns ``(x_indices, y_values)`` where both have the same length; the
+    ``x`` values stay non-decreasing (dx = segment length).  Used so long
+    traces are only uploaded to pyqtgraph at display resolution, keeping
+    wiggle rebuilds fast even for million-frame files.
+    """
+    n = values.shape[0]
+    if n <= max_points:
+        return np.arange(n, dtype=np.float64), values
+    segments = max_points
+    seg = max(1, n // segments)
+    block = values[: segments * seg].reshape(segments, seg)
+    out_y = np.empty(segments * 2, dtype=values.dtype)
+    out_y[0::2] = block.max(axis=1)
+    out_y[1::2] = block.min(axis=1)
+    out_x = (np.repeat(np.arange(segments, dtype=np.float64), 2) * seg)
+    return out_x, out_y
+
+
 class DistanceAxisItem(pg.AxisItem):
     """Left axis that shows tick labels as physical distance or channel number.
 
@@ -134,8 +155,17 @@ class SpaceTimeView(QWidget):
     view_range_changed = pyqtSignal(tuple, tuple)
     cursor_info = pyqtSignal(str)
 
-    WIGGLE_SCALE_MODES = ["全局最大值", "单道最大值", "全局均方根", "单道均方根", "全局平均值"]
+    WIGGLE_SCALE_MODES = [
+        "全局最大值",
+        "三道最大值",
+        "单道最大值",
+        "全局均方根",
+        "三道均方根",
+        "单道均方根",
+        "全局平均值",
+    ]
     MAX_WIGGLE_TRACES = 150
+    MAX_WIGGLE_POINTS = 4000
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -230,9 +260,9 @@ class SpaceTimeView(QWidget):
         waveform_row_layout.setContentsMargins(0, 0, 0, 0)
         waveform_row_layout.setSpacing(6)
         waveform_row_layout.addWidget(self.waveform_plot, 1)
-        waveform_right_spacer = QWidget()
-        waveform_right_spacer.setFixedWidth(150)
-        waveform_row_layout.addWidget(waveform_right_spacer)
+        self.waveform_right_spacer = QWidget()
+        self.waveform_right_spacer.setFixedWidth(150)
+        waveform_row_layout.addWidget(self.waveform_right_spacer)
 
         self.histogram_widget = pg.HistogramLUTWidget(orientation="vertical")
         self.histogram_widget.setImageItem(self.image_item)
@@ -407,15 +437,18 @@ class SpaceTimeView(QWidget):
         self._sync_visible_items()
 
     def set_wiggle_params(self, params: dict) -> None:
-        """Update wiggle rendering parameters and refresh immediately."""
+        """Update wiggle rendering parameters and refresh (debounced)."""
         self._wiggle_params.update(params)
-        if self._plot_mode == "wiggle":
-            self._refresh_wiggle()
+        if self._plot_mode == "wiggle" and not self._wiggle_timer.isActive():
+            self._wiggle_timer.start()
 
     def _sync_visible_items(self) -> None:
         image_mode = self._plot_mode == "image"
         self.image_item.setVisible(image_mode)
         self.histogram_widget.setVisible(image_mode)
+        # Keep the single-trace plot and the lower plot the same width: the
+        # noise map hides the histogram, so drop the matching right spacer too.
+        self.waveform_right_spacer.setVisible(image_mode)
         if image_mode:
             for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
                 item.setVisible(False)
@@ -470,13 +503,31 @@ class SpaceTimeView(QWidget):
         matrix = data[:, point_slice]
         if matrix.size == 0:
             return
-        slice_abs = np.abs(matrix)
-        slice_amp = np.max(slice_abs)
-        slice_rms = float(np.sqrt(np.mean(np.square(matrix[:: max(1, matrix.shape[0] // 1_000_000)]) if matrix.size > 1_000_000 else matrix)))
-        slice_abs_mean = float(np.mean(slice_abs))
+        rows = matrix.shape[0]
+        cols = matrix.shape[1]
+
+        # Bounded (subsampled) statistics so each rebuild stays fast even for
+        # million-frame files, and nan-safe for partially corrupted data.
+        target_samples = 2_000_000
+        stat_step = max(1, int(np.ceil(rows * cols / target_samples)))
+        abs_sub = np.abs(matrix[::stat_step, :])
+        col_amp = np.nanmax(abs_sub, axis=0)
+        slice_amp = float(np.nanmax(col_amp)) if col_amp.size else 0.0
+        sub_len = abs_sub.shape[0]
+        col_sqsum = np.nansum(np.square(abs_sub), axis=0)
+        slice_rms = float(np.sqrt(col_sqsum.sum() / max(sub_len * cols, 1)))
+        slice_abs_mean = float(np.nanmean(abs_sub))
+
+        def _column_tri(col: int) -> tuple[float, float]:
+            lo = max(0, col - 1)
+            hi = min(cols, col + 2)
+            amp = float(np.nanmax(col_amp[lo:hi])) if lo < hi else 0.0
+            count = max((hi - lo) * sub_len, 1)
+            rms = float(np.sqrt(col_sqsum[lo:hi].sum() / count))
+            return amp, rms
 
         sample_rate = self._metadata.sample_rate_hz
-        nframes = matrix.shape[0]
+        nframes = rows
         gain = 10.0 ** (float(params.get("gain_db") or 0.0) / 20.0)
         flip = bool(params.get("flip"))
         clip = params.get("clip")
@@ -491,40 +542,53 @@ class SpaceTimeView(QWidget):
         gray_pen = pg.mkPen(color="#9aa0a6", width=0.8)
         fill_brush = QBrush(QColor("#000000"))
 
+        raw_x = np.arange(nframes, dtype=np.float64) / sample_rate
+
         for channel in channel_values:
             column = int(channel - self._y_start_point)
             trace = matrix[:, column]
             if trace.shape[0] == 0:
                 continue
-            trace_abs = np.abs(trace)
-            trace_max = float(np.max(trace_abs))
+
+            tri_amp, tri_rms = _column_tri(column)
+            col_max = float(col_amp[column]) if col_amp.size else 0.0
+            col_rms = float(np.sqrt(col_sqsum[column] / max(sub_len, 1)))
             if scale_mode == "全局最大值":
                 scale = 1.0 / slice_amp if slice_amp > 1e-12 else 1.0
+            elif scale_mode == "三道最大值":
+                scale = 1.0 / tri_amp if tri_amp > 1e-12 else 1.0
             elif scale_mode == "单道最大值":
-                scale = 1.0 / trace_max if trace_max > 1e-12 else 1.0
+                scale = 1.0 / col_max if col_max > 1e-12 else 1.0
             elif scale_mode == "全局均方根":
                 scale = 1.0 / slice_rms if slice_rms > 1e-12 else 1.0
+            elif scale_mode == "三道均方根":
+                scale = 1.0 / tri_rms if tri_rms > 1e-12 else 1.0
             elif scale_mode == "单道均方根":
-                trace_rms = float(np.sqrt(np.mean(np.square(trace))))
-                scale = 1.0 / trace_rms if trace_rms > 1e-12 else 1.0
+                scale = 1.0 / col_rms if col_rms > 1e-12 else 1.0
             elif scale_mode == "全局平均值":
                 scale = 1.0 / slice_abs_mean if slice_abs_mean > 1e-12 else 1.0
             else:
                 scale = 1.0
 
-            scaled = trace.astype(np.float64, copy=False) * scale * gain
-            if flip:
-                scaled = -scaled
+            scaled = (trace * (scale * gain)).astype(np.float32, copy=False)
+            scaled = np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0)
             if clip is not None and clip > 0:
                 np.clip(scaled, -clip, clip, out=scaled)
+            if flip:
+                scaled = -scaled
 
             baseline = float(channel)
-            x_values = np.arange(nframes, dtype=np.float64) / sample_rate
             trace_y = baseline + scaled
+            if trace_y.size > self.MAX_WIGGLE_POINTS:
+                x_plot, y_plot = _decimate_peaks(trace_y, self.MAX_WIGGLE_POINTS)
+                x_plot = x_plot / sample_rate
+            else:
+                x_plot = raw_x
+                y_plot = trace_y
 
             trace_item = pg.PlotDataItem(
-                x=x_values,
-                y=np.ascontiguousarray(trace_y),
+                x=x_plot,
+                y=np.ascontiguousarray(y_plot),
                 pen=black_pen,
             )
             self.plot_widget.addItem(trace_item)
@@ -542,12 +606,14 @@ class SpaceTimeView(QWidget):
             self._wiggle_baselines.append(baseline_item)
 
             if fill:
-                if fill_negative:
-                    fill_y = trace_y
+                fill_y = trace_y if fill_negative else baseline + np.maximum(scaled, 0.0)
+                if fill_y.size > self.MAX_WIGGLE_POINTS:
+                    fill_x, fill_y = _decimate_peaks(fill_y, self.MAX_WIGGLE_POINTS)
+                    fill_x = fill_x / sample_rate
                 else:
-                    fill_y = baseline + np.maximum(scaled, 0.0)
+                    fill_x = x_plot
                 fill_item = pg.PlotDataItem(
-                    x=x_values,
+                    x=fill_x,
                     y=np.ascontiguousarray(fill_y),
                     pen=None,
                     brush=fill_brush,

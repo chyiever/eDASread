@@ -43,6 +43,19 @@ def _uniform_param_cell(label_text: str, widget: QWidget, *, width: int | None =
     return cell
 
 
+def _labeled_pair(label_text: str, widget: QWidget) -> QWidget:
+    """Label-left, input-right compact pair for a single-row parameter strip."""
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(5)
+    label = QLabel(label_text)
+    label.setFont(widget.font())
+    layout.addWidget(label)
+    layout.addWidget(widget)
+    return container
+
+
 class TrafficTrajectoryView(QWidget):
     """Tab5 controls, energy image, and multi-polyline annotation state."""
 
@@ -65,10 +78,9 @@ class TrafficTrajectoryView(QWidget):
 
     def _build_ui(self) -> None:
         controls = QGroupBox("交通 DAS 能量图与轨迹标记参数")
-        grid = QGridLayout(controls)
-        grid.setContentsMargins(8, 8, 8, 8)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
+        row = QHBoxLayout(controls)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(8)
         self.channel_start_edit = QLineEdit("200")
         self.channel_end_edit = QLineEdit("820")
         self.display_mode_combo = QComboBox()
@@ -101,38 +113,37 @@ class TrafficTrajectoryView(QWidget):
             self.apply_color_button, self.generate_button,
         ]:
             widget.setFont(QFont("Times New Roman", 10))
-        self.auto_color_checkbox.setFixedWidth(110)
-        self.common_mode_checkbox.setFixedWidth(100)
-        self.apply_color_button.setFixedWidth(116)
-        self.generate_button.setFixedWidth(116)
+        for edit, width in [
+            (self.channel_start_edit, 70),
+            (self.channel_end_edit, 70),
+            (self.low_cut_edit, 60),
+            (self.high_cut_edit, 60),
+            (self.decimation_edit, 60),
+            (self.vmin_edit, 60),
+            (self.vmax_edit, 60),
+        ]:
+            edit.setFixedWidth(width)
+        self.display_mode_combo.setFixedWidth(96)
+        self.balance_combo.setFixedWidth(80)
+        self.colormap_combo.setFixedWidth(96)
+        self.apply_color_button.setFixedWidth(104)
+        self.generate_button.setFixedWidth(104)
 
-        row_0 = [
-            ("图像类型", self.display_mode_combo),
-            ("通道起点", self.channel_start_edit),
-            ("通道终点(含)", self.channel_end_edit),
-            ("低频(Hz)", self.low_cut_edit),
-            ("高频(Hz)", self.high_cut_edit),
-            ("降采样", self.decimation_edit),
-            ("通道均衡", self.balance_combo),
-        ]
-        row_1 = [
-            ("Colormap", self.colormap_combo),
-            ("VMin", self.vmin_edit),
-            ("VMax", self.vmax_edit),
-        ]
-        row_1_actions = [
-            self.auto_color_checkbox,
-            self.common_mode_checkbox,
-            self.apply_color_button,
-            self.generate_button,
-        ]
-        for col, (label_text, widget) in enumerate(row_0):
-            grid.addWidget(_uniform_param_cell(label_text, widget), 0, col)
-        for col, (label_text, widget) in enumerate(row_1):
-            grid.addWidget(_uniform_param_cell(label_text, widget), 1, col)
-        for col, widget in enumerate(row_1_actions, start=len(row_1)):
-            grid.addWidget(widget, 1, col)
-        grid.setColumnStretch(len(row_1) + len(row_1_actions), 1)
+        row.addWidget(_labeled_pair("图像类型", self.display_mode_combo))
+        row.addWidget(_labeled_pair("通道起点", self.channel_start_edit))
+        row.addWidget(_labeled_pair("通道终点", self.channel_end_edit))
+        row.addWidget(_labeled_pair("低频(Hz)", self.low_cut_edit))
+        row.addWidget(_labeled_pair("高频(Hz)", self.high_cut_edit))
+        row.addWidget(_labeled_pair("降采样", self.decimation_edit))
+        row.addWidget(_labeled_pair("通道均衡", self.balance_combo))
+        row.addWidget(_labeled_pair("Colormap", self.colormap_combo))
+        row.addWidget(_labeled_pair("VMin", self.vmin_edit))
+        row.addWidget(_labeled_pair("VMax", self.vmax_edit))
+        row.addWidget(self.auto_color_checkbox)
+        row.addWidget(self.common_mode_checkbox)
+        row.addWidget(self.apply_color_button)
+        row.addWidget(self.generate_button)
+        row.addStretch(1)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.channel_axis = pg.AxisItem(orientation="left")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator, QFont, QIntValidator
 from PyQt5.QtWidgets import (
@@ -20,6 +22,97 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def _format_number(value) -> str:
+    return f"{value:g}"
+
+
+def parse_point_range_text(text: str):
+    """Parse ``A~B`` into ``(start, end)`` ints, or ``None`` when invalid."""
+    raw = text.strip().replace("～", "~")
+    if not raw:
+        return None
+    parts = raw.split("~", maxsplit=1)
+    try:
+        if len(parts) == 2:
+            if not parts[0] and not parts[1]:
+                return None
+            start = int(parts[0]) if parts[0].strip() else 1
+            end = int(parts[1]) if parts[1].strip() else start
+        else:
+            start = end = int(parts[0])
+    except ValueError:
+        return None
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def parse_color_range_text(text: str):
+    """Parse ``A~B`` into two floats (``None`` means auto)."""
+    raw = text.strip().replace("～", "~")
+    parts = raw.split("~", maxsplit=1)
+    try:
+        if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+            return None
+        low = float(parts[0].strip())
+        high = float(parts[1].strip())
+    except ValueError:
+        return None
+    if low > high:
+        low, high = high, low
+    return low, high
+
+
+def parse_filter_text(text: str):
+    """Parse a merged filter string into ``(filter_type, low_hz, high_hz)``.
+
+    Forms: ``1~`` high-pass 1 Hz; ``~300`` low-pass 300 Hz; ``5k~20k``
+    band-pass 5 kHz - 20 kHz; empty/``none`` = no filter.
+    """
+    raw = text.strip().replace("～", "~")
+    if not raw or raw.lower() in ("none", "auto"):
+        return "none", None, None
+    parts = re.split(r"~", raw, maxsplit=1)
+    if len(parts) < 2:
+        return "none", None, None
+
+    def _to_hz(side: str):
+        side = side.strip().lower()
+        if not side:
+            return None
+        multiplier = 1.0
+        if side.endswith("k"):
+            multiplier = 1000.0
+            side = side[:-1]
+        try:
+            value = float(side) * multiplier
+        except ValueError:
+            return None
+        return value
+
+    low = _to_hz(parts[0])
+    high = _to_hz(parts[1])
+    if low is None and high is None:
+        return "none", None, None
+    if low is not None and high is None:
+        return "highpass", low, None
+    if low is None and high is not None:
+        return "lowpass", None, high
+    if low > high:
+        low, high = high, low
+    return "bandpass", low, high
+
+
+def format_filter_text(filter_type: str, low_hz, high_hz) -> str:
+    if filter_type in ("none", "") or (low_hz is None and high_hz is None):
+        return ""
+    if filter_type == "highpass":
+        return f"{_format_number(float(low_hz))}~"
+    if filter_type == "lowpass":
+        return f"~{_format_number(float(high_hz))}"
+    return f"{_format_number(float(low_hz))}~{_format_number(float(high_hz))}"
 
 
 class WheelIntLineEdit(QLineEdit):
@@ -108,17 +201,34 @@ class ControlPanel(QWidget):
         self.display_mode_combo.addItems(["时空颜色图", "多道波形(Wiggle)"])
         self.display_mode_combo.setCurrentText("时空颜色图")
 
+        self.point_range_edit = QLineEdit("1~100")
+        self.color_range_edit = QLineEdit("-0.4~0.4")
+        self.filter_edit = QLineEdit("10~")
+        self._merging_edit_sync = False
+        self.point_range_edit.textChanged.connect(self._sync_merged_to_parts)
+        self.color_range_edit.textChanged.connect(self._sync_merged_to_parts)
+        self.filter_edit.textChanged.connect(self._sync_merged_to_parts)
+
         self.wiggle_scale_combo = QComboBox()
         self.wiggle_scale_combo.addItems([
-            "全局最大值", "单道最大值", "全局均方根", "单道均方根", "全局平均值",
+            "全局最大值", "三道最大值", "单道最大值",
+            "全局均方根", "三道均方根", "单道均方根", "全局平均值",
         ])
         self.wiggle_scale_combo.setCurrentText("全局最大值")
         self.gain_slider = QSlider(Qt.Horizontal)
         self.gain_slider.setRange(-60, 60)
         self.gain_slider.setValue(0)
-        self.gain_slider.setMinimumWidth(120)
+        self.gain_slider.setFixedWidth(70)
+        self.gain_minus_button = QPushButton("−")
+        self.gain_minus_button.setFixedSize(24, 24)
+        self.gain_minus_button.setToolTip("增益 -5 dB")
+        self.gain_plus_button = QPushButton("+")
+        self.gain_plus_button.setFixedSize(24, 24)
+        self.gain_plus_button.setToolTip("增益 +5 dB")
+        self.gain_minus_button.clicked.connect(lambda: self.gain_slider.setValue(self.gain_slider.value() - 5))
+        self.gain_plus_button.clicked.connect(lambda: self.gain_slider.setValue(self.gain_slider.value() + 5))
         self.gain_edit = QLineEdit("0")
-        self.gain_edit.setFixedWidth(56)
+        self.gain_edit.setFixedWidth(48)
         self.gain_edit.setAlignment(Qt.AlignCenter)
         self.gain_edit.setValidator(QIntValidator(-60, 60, self))
         self.flip_checkbox = QCheckBox("负向翻转")
@@ -177,14 +287,10 @@ class ControlPanel(QWidget):
         self.export_button = QPushButton("Export Current View")
 
         for widget in [
-            self.point_start_edit,
-            self.point_end_edit,
-            self.vmin_edit,
-            self.vmax_edit,
+            self.point_range_edit,
+            self.color_range_edit,
+            self.filter_edit,
             self.colormap_combo,
-            self.filter_type_combo,
-            self.low_cut_edit,
-            self.high_cut_edit,
             self.export_path_edit,
             self.waveform_point_edit,
             self.fk_spacing_edit,
@@ -243,22 +349,18 @@ class ControlPanel(QWidget):
 
         param_area = self._build_parameter_grid(
             [
-                ("Point Start", self.point_start_edit),
-                ("Point End", self.point_end_edit),
-                ("VMin", self.vmin_edit),
-                ("VMax", self.vmax_edit),
-                ("Colormap", self.colormap_combo),
-                ("Y轴显示", self.y_axis_combo),
-                ("距离单位", self.distance_unit_combo),
+                ("Point Range", self.point_range_edit, 128),
+                ("Color Range", self.color_range_edit, 128),
+                ("Colormap", self.colormap_combo, 104),
+                ("Y轴显示", self.y_axis_combo, 84),
+                ("距离单位", self.distance_unit_combo, 60),
+                ("图类型", self.display_mode_combo, 148),
             ],
             [
-                ("道间距(m)", self.trace_spacing_edit),
-                ("首道位置(m)", self.first_trace_pos_edit),
-                ("滤波", self.filter_type_combo),
-                ("低频(Hz)", self.low_cut_edit),
-                ("高频(Hz)", self.high_cut_edit),
-                ("波形点", self.waveform_point_edit),
-                ("图类型", self.display_mode_combo),
+                ("道间距(m)", self.trace_spacing_edit, 70),
+                ("首道位置(m)", self.first_trace_pos_edit, 70),
+                ("滤波(Hz)", self.filter_edit, 128),
+                ("波形点", self.waveform_point_edit, 70),
             ],
         )
 
@@ -311,12 +413,9 @@ class ControlPanel(QWidget):
             button.setMinimumHeight(24)
             button.setMaximumHeight(28)
         for edit in [
-            self.point_start_edit,
-            self.point_end_edit,
-            self.vmin_edit,
-            self.vmax_edit,
-            self.low_cut_edit,
-            self.high_cut_edit,
+            self.point_range_edit,
+            self.color_range_edit,
+            self.filter_edit,
             self.fk_spacing_edit,
             self.fk_vmin_edit,
             self.fk_vmax_edit,
@@ -385,8 +484,10 @@ class ControlPanel(QWidget):
         gain_label.setFont(self.gain_slider.font())
         gain_label.setAlignment(Qt.AlignCenter)
         gain_cell_body = QHBoxLayout()
-        gain_cell_body.setSpacing(4)
+        gain_cell_body.setSpacing(3)
+        gain_cell_body.addWidget(self.gain_minus_button)
         gain_cell_body.addWidget(self.gain_slider, 1)
+        gain_cell_body.addWidget(self.gain_plus_button)
         gain_cell_body.addWidget(self.gain_edit)
         gain_cell_layout.addWidget(gain_label)
         gain_cell_layout.addLayout(gain_cell_body)
@@ -417,23 +518,39 @@ class ControlPanel(QWidget):
         for button in self.denoise_buttons:
             button.setEnabled(enabled)
 
-    def _build_parameter_grid(self, *rows: list[tuple[str, QWidget]]) -> QWidget:
+    def _build_parameter_grid(self, *rows: list[tuple[str, QWidget, int]]) -> QWidget:
         container = QWidget()
         grid = QGridLayout(container)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(8)
+        grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(4)
         columns = max((len(row) for row in rows), default=0)
         for row_index, row_items in enumerate(rows):
-            for col_index, (label_text, widget) in enumerate(row_items):
+            for col_index, (label_text, widget, width) in enumerate(row_items):
                 grid.addWidget(
-                    self._build_parameter_cell(label_text, widget),
+                    self._build_labeled_pair(label_text, widget, width),
                     row_index,
                     col_index,
                 )
-        for col in range(columns):
-            grid.setColumnStretch(col, 1)
+        if columns > 0:
+            grid.setColumnStretch(columns, 1)
+            grid.setColumnMinimumWidth(columns, 12)
         return container
+
+    def _build_labeled_pair(self, label_text: str, widget: QWidget, width: int) -> QWidget:
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        label = QLabel(label_text)
+        label.setFont(widget.font())
+        widget.setFixedWidth(width)
+        widget.setMinimumWidth(width)
+
+        row_layout.addWidget(label)
+        row_layout.addWidget(widget)
+        return row_widget
 
     def _build_parameter_cell(self, label_text: str, widget: QWidget) -> QWidget:
         cell = QWidget()
@@ -477,6 +594,60 @@ class ControlPanel(QWidget):
             row_layout.addWidget(label)
             row_layout.addWidget(widget, 1)
         return row_widget
+
+    def _sync_merged_to_parts(self, *_args) -> None:
+        """Push merged range/filter edits into the internal widgets."""
+        if self._merging_edit_sync:
+            return
+        self._merging_edit_sync = True
+        try:
+            point_range = parse_point_range_text(self.point_range_edit.text())
+            if point_range is not None:
+                self.point_start_edit.setText(str(point_range[0]))
+                self.point_end_edit.setText(str(point_range[1]))
+
+            color_range = parse_color_range_text(self.color_range_edit.text())
+            if color_range is not None:
+                if color_range[0] is None:
+                    self.vmin_edit.clear()
+                    self.vmax_edit.clear()
+                else:
+                    self.vmin_edit.setText(_format_number(color_range[0]))
+                    self.vmax_edit.setText(_format_number(color_range[1]))
+
+            filter_type, low_hz, high_hz = parse_filter_text(self.filter_edit.text())
+            self.filter_type_combo.setCurrentText(filter_type)
+            self.low_cut_edit.setText(_format_number(low_hz) if low_hz is not None else "")
+            self.high_cut_edit.setText(_format_number(high_hz) if high_hz is not None else "")
+        finally:
+            self._merging_edit_sync = False
+
+    def refresh_merged_edits(self) -> None:
+        """Rebuild merged edit texts from the internal widget values."""
+        if self._merging_edit_sync:
+            return
+        self._merging_edit_sync = True
+        try:
+            start_text = self.point_start_edit.text().strip()
+            end_text = self.point_end_edit.text().strip()
+            if start_text and end_text:
+                self.point_range_edit.setText(f"{start_text}~{end_text}")
+
+            vmin_text = self.vmin_edit.text().strip()
+            vmax_text = self.vmax_edit.text().strip()
+            if vmin_text and vmax_text:
+                self.color_range_edit.setText(f"{vmin_text}~{vmax_text}")
+            elif not vmin_text and not vmax_text:
+                self.color_range_edit.clear()
+
+            filter_type = self.filter_type_combo.currentText().strip().lower()
+            low_text = self.low_cut_edit.text().strip()
+            high_text = self.high_cut_edit.text().strip()
+            low_hz = float(low_text) if low_text else None
+            high_hz = float(high_text) if high_text else None
+            self.filter_edit.setText(format_filter_text(filter_type, low_hz, high_hz))
+        finally:
+            self._merging_edit_sync = False
 
     def _choose_export_directory(self) -> None:
         directory = QFileDialog.getExistingDirectory(

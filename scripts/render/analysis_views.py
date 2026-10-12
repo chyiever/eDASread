@@ -185,22 +185,18 @@ class ChannelAnalysisView(QWidget):
             edit.setFixedWidth(84)
         controls = QGroupBox("通道分析")
         controls.setFont(ui_font)
-        controls_layout = QGridLayout(controls)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setHorizontalSpacing(10)
-        controls_layout.setVerticalSpacing(6)
-        controls_layout.addWidget(self._labeled_widget("通道", self.channels_edit), 0, 0, 1, 2)
-        controls_layout.addWidget(self._labeled_widget("PSD窗长", self.psd_nperseg_edit), 0, 2)
-        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.psd_overlap_edit), 0, 3)
-        controls_layout.addWidget(self._labeled_widget("FMin", self.psd_fmin_edit), 1, 0)
-        controls_layout.addWidget(self._labeled_widget("FMax", self.psd_fmax_edit), 1, 1)
-        controls_layout.addWidget(self._labeled_widget("PSD Min", self.psd_ymin_edit), 1, 2)
-        controls_layout.addWidget(self._labeled_widget("PSD Max", self.psd_ymax_edit), 1, 3)
-        controls_layout.addWidget(self.plot_button, 0, 4, 2, 1)
-        controls_layout.setColumnStretch(0, 1)
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(2, 1)
-        controls_layout.setColumnStretch(3, 1)
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(8, 6, 8, 6)
+        controls_layout.setSpacing(8)
+        controls_layout.addWidget(self._labeled_widget("通道", self.channels_edit))
+        controls_layout.addWidget(self._labeled_widget("PSD窗长", self.psd_nperseg_edit))
+        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.psd_overlap_edit))
+        controls_layout.addWidget(self._labeled_widget("FMin", self.psd_fmin_edit))
+        controls_layout.addWidget(self._labeled_widget("FMax", self.psd_fmax_edit))
+        controls_layout.addWidget(self._labeled_widget("PSD Min", self.psd_ymin_edit))
+        controls_layout.addWidget(self._labeled_widget("PSD Max", self.psd_ymax_edit))
+        controls_layout.addWidget(self.plot_button)
+        controls_layout.addStretch(1)
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self._time_view_box = TimeSelectionViewBox()
@@ -609,37 +605,45 @@ class FkSpectrumView(QWidget):
 
         controls = QGroupBox("f-k 谱")
         controls.setFont(ui_font)
-        controls_layout = QGridLayout(controls)
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(4)
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(8, 6, 8, 6)
+        controls_layout.setSpacing(8)
 
-        self.remove_bg_checkbox.setFixedWidth(100)
+        for edit, width in [
+            (self.channel_range_edit, 96),
+            (self.spacing_edit, 56),
+            (self.spatial_taper_edit, 60),
+            (self.temporal_taper_edit, 60),
+            (self.nfft_channels_edit, 60),
+            (self.nfft_samples_edit, 60),
+        ]:
+            edit.setFixedWidth(width)
+        for edit in [
+            self.fmin_edit,
+            self.fmax_edit,
+            self.kmin_edit,
+            self.kmax_edit,
+            self.vmin_db_edit,
+            self.vmax_db_edit,
+        ]:
+            edit.setFixedWidth(64)
         self.plot_button.setFixedWidth(110)
 
-        row_0 = [
-            ("通道范围", self.channel_range_edit),
-            ("间距(m)", self.spacing_edit),
-            ("空间taper", self.spatial_taper_edit),
-            ("时间taper", self.temporal_taper_edit),
-            ("NFFT-K", self.nfft_channels_edit),
-            ("NFFT-T", self.nfft_samples_edit),
-        ]
-        row_1 = [
-            ("FMin", self.fmin_edit),
-            ("FMax", self.fmax_edit),
-            ("KMin", self.kmin_edit),
-            ("KMax", self.kmax_edit),
-            ("VMin(dB)", self.vmin_db_edit),
-            ("VMax(dB)", self.vmax_db_edit),
-        ]
-        for col, (label_text, widget) in enumerate(row_0):
-            controls_layout.addWidget(_uniform_param_cell(label_text, widget), 0, col)
-        controls_layout.addWidget(self.remove_bg_checkbox, 0, 6)
-        for col, (label_text, widget) in enumerate(row_1):
-            controls_layout.addWidget(_uniform_param_cell(label_text, widget), 1, col)
-        controls_layout.addWidget(self.plot_button, 1, 6)
-        controls_layout.setColumnStretch(7, 1)
+        controls_layout.addWidget(self._labeled_widget("通道范围", self.channel_range_edit))
+        controls_layout.addWidget(self._labeled_widget("间距(m)", self.spacing_edit))
+        controls_layout.addWidget(self._labeled_widget("空间taper", self.spatial_taper_edit))
+        controls_layout.addWidget(self._labeled_widget("时间taper", self.temporal_taper_edit))
+        controls_layout.addWidget(self._labeled_widget("NFFT-K", self.nfft_channels_edit))
+        controls_layout.addWidget(self._labeled_widget("NFFT-T", self.nfft_samples_edit))
+        controls_layout.addWidget(self.remove_bg_checkbox)
+        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit))
+        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit))
+        controls_layout.addWidget(self._labeled_widget("KMin", self.kmin_edit))
+        controls_layout.addWidget(self._labeled_widget("KMax", self.kmax_edit))
+        controls_layout.addWidget(self._labeled_widget("VMin(dB)", self.vmin_db_edit))
+        controls_layout.addWidget(self._labeled_widget("VMax(dB)", self.vmax_db_edit))
+        controls_layout.addWidget(self.plot_button)
+        controls_layout.addStretch(1)
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("w")
@@ -835,27 +839,27 @@ class TimeFrequencyAnalysisView(QWidget):
 
         controls = QGroupBox("Tab4 时域/时频参数")
         controls.setFont(ui_font)
-        controls_layout = QGridLayout(controls)
+        controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(6, 4, 6, 4)
-        controls_layout.setHorizontalSpacing(6)
-        controls_layout.setVerticalSpacing(2)
-        controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit), 0, 0)
-        controls_layout.addWidget(self._labeled_widget("滤波", self.filter_type_combo), 0, 1)
-        controls_layout.addWidget(self._labeled_widget("Low Cut", self.low_cut_edit), 0, 2)
-        controls_layout.addWidget(self._labeled_widget("High Cut", self.high_cut_edit), 0, 3)
-        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo), 0, 4)
-        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo), 0, 5)
-        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit), 0, 6)
-        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit), 0, 7)
-        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit), 1, 0)
-        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit), 1, 1)
-        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit), 1, 2)
-        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit), 1, 3)
-        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit), 1, 4)
-        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo), 1, 5)
-        controls_layout.addWidget(self.auto_color_checkbox, 1, 6)
-        controls_layout.addWidget(self.apply_color_button, 1, 7)
-        controls_layout.addWidget(self.plot_button, 1, 8)
+        controls_layout.setSpacing(8)
+        controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit))
+        controls_layout.addWidget(self._labeled_widget("滤波", self.filter_type_combo))
+        controls_layout.addWidget(self._labeled_widget("Low Cut", self.low_cut_edit))
+        controls_layout.addWidget(self._labeled_widget("High Cut", self.high_cut_edit))
+        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo))
+        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo))
+        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit))
+        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit))
+        controls_layout.addWidget(self._labeled_widget("FMin", self.fmin_edit))
+        controls_layout.addWidget(self._labeled_widget("FMax", self.fmax_edit))
+        controls_layout.addWidget(self._labeled_widget("VMin", self.vmin_edit))
+        controls_layout.addWidget(self._labeled_widget("VMax", self.vmax_edit))
+        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit))
+        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo))
+        controls_layout.addWidget(self.auto_color_checkbox)
+        controls_layout.addWidget(self.apply_color_button)
+        controls_layout.addWidget(self.plot_button)
+        controls_layout.addStretch(1)
 
         self._metadata: FileMetadata | None = None
         self._channel = 1
