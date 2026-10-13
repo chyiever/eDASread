@@ -25,9 +25,11 @@ def _decimate_peaks(values: np.ndarray, max_points: int) -> tuple[np.ndarray, np
     """Reduce a trace to ``<= max_points`` samples keeping the min/max envelope.
 
     Returns ``(x_indices, y_values)`` where both have the same length; the
-    ``x`` values stay non-decreasing (dx = segment length).  Used so long
-    traces are only uploaded to pyqtgraph at display resolution, keeping
-    wiggle rebuilds fast even for million-frame files.
+    ``x`` values stay non-decreasing (dx = segment length).  The original
+    final sample is always appended so the trace still reaches the very end of
+    the time axis.  Used so long traces are only uploaded to pyqtgraph at
+    display resolution, keeping wiggle rebuilds fast even for million-frame
+    files.
     """
     n = values.shape[0]
     if n <= max_points:
@@ -35,10 +37,14 @@ def _decimate_peaks(values: np.ndarray, max_points: int) -> tuple[np.ndarray, np
     segments = max_points
     seg = max(1, n // segments)
     block = values[: segments * seg].reshape(segments, seg)
-    out_y = np.empty(segments * 2, dtype=values.dtype)
-    out_y[0::2] = block.max(axis=1)
-    out_y[1::2] = block.min(axis=1)
-    out_x = (np.repeat(np.arange(segments, dtype=np.float64), 2) * seg)
+    out_y = np.empty(segments * 2 + 1, dtype=values.dtype)
+    out_y[0 : segments * 2 : 2] = block.max(axis=1)
+    out_y[1 : segments * 2 : 2] = block.min(axis=1)
+    out_y[-1] = values[-1]
+    out_x = np.empty(segments * 2 + 1, dtype=np.float64)
+    out_x[0 : segments * 2 : 2] = np.arange(segments, dtype=np.float64) * seg
+    out_x[1 : segments * 2 : 2] = np.arange(segments, dtype=np.float64) * seg
+    out_x[-1] = n - 1
     return out_x, out_y
 
 
@@ -443,8 +449,15 @@ class SpaceTimeView(QWidget):
 
     def set_plot_mode(self, mode: str) -> None:
         """Switch Tab1 lower plot between the time-space color map and wiggle."""
-        self._plot_mode = "image" if str(mode).strip() == "时空颜色图" else "wiggle"
+        new_mode = "image" if str(mode).strip() == "时空颜色图" else "wiggle"
+        if new_mode == self._plot_mode:
+            return
+        self._plot_mode = new_mode
         self._sync_visible_items()
+        # Show the full time/channel extent on every mode switch so a zoom
+        # window left over from the other mode does not make the Wiggle (or
+        # the color map) look truncated on the right.
+        self.reset_view(clear_history=False)
 
     def set_wiggle_params(self, params: dict) -> None:
         """Update wiggle rendering parameters and refresh (debounced)."""
@@ -674,13 +687,10 @@ class SpaceTimeView(QWidget):
 
             trace_item = pg.PlotDataItem(x=x_time, y=y_plot, pen=black_pen)
             self.plot_widget.addItem(trace_item)
-            trace_item.setDownsampling(auto=True, method="peak")
-            trace_item.setClipToView(True)
             self._wiggle_items.append(trace_item)
 
             baseline_item = pg.PlotDataItem(x=x_axis_display, y=[baseline, baseline], pen=gray_pen)
             self.plot_widget.addItem(baseline_item)
-            baseline_item.setClipToView(True)
             self._wiggle_baselines.append(baseline_item)
 
             if fill and fill_y is not None:
@@ -688,8 +698,6 @@ class SpaceTimeView(QWidget):
                     x=x_time, y=fill_y, pen=None, brush=fill_brush, fillLevel=baseline
                 )
                 self.plot_widget.addItem(fill_item)
-                fill_item.setDownsampling(auto=True, method="peak")
-                fill_item.setClipToView(True)
                 fill_item.setZValue(-1)
                 self._wiggle_fills.append(fill_item)
 
