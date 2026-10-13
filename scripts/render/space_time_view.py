@@ -165,7 +165,7 @@ class SpaceTimeView(QWidget):
         "全局平均值",
     ]
     MAX_WIGGLE_TRACES = 150
-    MAX_WIGGLE_POINTS = 4000
+    MAX_WIGGLE_POINTS = 2000
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -187,6 +187,12 @@ class SpaceTimeView(QWidget):
         self._wiggle_items: list[pg.PlotDataItem] = []
         self._wiggle_fills: list[pg.PlotDataItem] = []
         self._wiggle_baselines: list[pg.PlotDataItem] = []
+        self._wiggle_stored_channels: list[int] = []
+        self._wiggle_stored_fill = False
+        self._wiggle_stored_fill_negative = False
+        self._wiggle_display_cache: list = []
+        self._w_stats_key: tuple | None = None
+        self._w_stats: dict | None = None
         self._wiggle_params: dict = {
             "scale_mode": "全局最大值",
             "gain_db": 0.0,
@@ -234,7 +240,7 @@ class SpaceTimeView(QWidget):
 
         self._wiggle_timer = QTimer(self)
         self._wiggle_timer.setSingleShot(True)
-        self._wiggle_timer.setInterval(40)
+        self._wiggle_timer.setInterval(25)
         self._wiggle_timer.timeout.connect(self._refresh_wiggle)
 
         self.waveform_axis = TimeAxisItem(orientation="bottom")
@@ -481,153 +487,232 @@ class SpaceTimeView(QWidget):
         return max(1, int(round(params.get("spacing_value") or 1)))
 
     def _refresh_wiggle(self) -> None:
-        """Rebuild the multi-channel wiggle profile from the current slice."""
+        """Refresh the multi-channel wiggle profile.
+
+        Amplitude-only changes (gain/flip/clip/scale mode) update the existing
+        items in place so dragging the gain slider stays smooth; only changes
+        that alter the trace set (spacing, fill toggles) trigger a rebuild.
+        """
+        if self._metadata is None or self._frame_data is None or self._plot_mode != "wiggle":
+            self._clear_wiggle_items()
+            return
+
+        params = self._wiggle_params
+        channels = self._compute_wiggle_channels()
+        needs_rebuild = (
+            not self._wiggle_items
+            or self._wiggle_stored_channels != list(channels)
+            or self._wiggle_stored_fill != bool(params.get("fill"))
+            or self._wiggle_stored_fill_negative != bool(params.get("fill_negative"))
+        )
+        if needs_rebuild:
+            self._rebuild_wiggle(channels)
+        else:
+            self._update_wiggle_data()
+
+    def _clear_wiggle_items(self) -> None:
         for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
             self.plot_widget.removeItem(item)
         self._wiggle_items.clear()
         self._wiggle_fills.clear()
         self._wiggle_baselines.clear()
+        self._wiggle_stored_channels = []
 
-        if self._metadata is None or self._frame_data is None:
-            return
-        if self._plot_mode != "wiggle":
-            return
-
-        params = self._wiggle_params
+    def _compute_wiggle_channels(self) -> list[int]:
         step = self._wiggle_spacing_step()
-        channel_values = np.arange(self._y_start_point, self._y_end_point + 1, step, dtype=int)
-        if channel_values.size == 0:
-            return
-        if channel_values.size > self.MAX_WIGGLE_TRACES:
-            extra = int(np.ceil(channel_values.size / self.MAX_WIGGLE_TRACES)) * step
-            channel_values = np.arange(self._y_start_point, self._y_end_point + 1, extra, dtype=int)
+        channels = np.arange(self._y_start_point, self._y_end_point + 1, step, dtype=int)
+        if channels.size == 0:
+            return []
+        if channels.size > self.MAX_WIGGLE_TRACES:
+            extra = int(np.ceil(channels.size / self.MAX_WIGGLE_TRACES)) * step
+            channels = np.arange(self._y_start_point, self._y_end_point + 1, extra, dtype=int)
+        return [int(c) for c in channels]
 
+    def _compute_wiggle_stats(self):
+        """Bounded (subsampled) nan-safe statistics for the current point slice.
+
+        Statistics only depend on the loaded data and the point range, so they
+        are cached and reused across amplitude-only wiggle updates.
+        """
         data = self._frame_data
+        if data is None:
+            return None
+        key = (id(data), self._y_start_point, self._y_end_point)
+        if self._w_stats_key == key and self._w_stats is not None:
+            self._w_stats["matrix"] = data[:, slice(self._y_start_point - 1, self._y_end_point)]
+            return self._w_stats
         point_slice = slice(self._y_start_point - 1, self._y_end_point)
         matrix = data[:, point_slice]
         if matrix.size == 0:
-            return
-        rows = matrix.shape[0]
-        cols = matrix.shape[1]
-
-        # Bounded (subsampled) statistics so each rebuild stays fast even for
-        # million-frame files, and nan-safe for partially corrupted data.
+            return None
+        rows, cols = matrix.shape
         target_samples = 2_000_000
         stat_step = max(1, int(np.ceil(rows * cols / target_samples)))
         abs_sub = np.abs(matrix[::stat_step, :])
         col_amp = np.nanmax(abs_sub, axis=0)
-        slice_amp = float(np.nanmax(col_amp)) if col_amp.size else 0.0
         sub_len = abs_sub.shape[0]
         col_sqsum = np.nansum(np.square(abs_sub), axis=0)
+        slice_amp = float(np.nanmax(col_amp)) if col_amp.size else 0.0
         slice_rms = float(np.sqrt(col_sqsum.sum() / max(sub_len * cols, 1)))
         slice_abs_mean = float(np.nanmean(abs_sub))
+        self._w_stats = {
+            "matrix": matrix,
+            "rows": rows,
+            "cols": cols,
+            "col_amp": col_amp,
+            "col_sqsum": col_sqsum,
+            "sub_len": sub_len,
+            "slice_amp": slice_amp,
+            "slice_rms": slice_rms,
+            "slice_abs_mean": slice_abs_mean,
+        }
+        self._w_stats_key = key
+        return self._w_stats
 
-        def _column_tri(col: int) -> tuple[float, float]:
-            lo = max(0, col - 1)
-            hi = min(cols, col + 2)
-            amp = float(np.nanmax(col_amp[lo:hi])) if lo < hi else 0.0
-            count = max((hi - lo) * sub_len, 1)
-            rms = float(np.sqrt(col_sqsum[lo:hi].sum() / count))
-            return amp, rms
+    def _select_wiggle_scale(self, column: int, stats: dict) -> float:
+        scale_mode = str(self._wiggle_params.get("scale_mode") or "全局最大值")
+        col_amp = stats["col_amp"]
+        col_sqsum = stats["col_sqsum"]
+        sub_len = stats["sub_len"]
+        cols = stats["cols"]
+        lo = max(0, column - 1)
+        hi = min(cols, column + 2)
+        tri_amp = float(np.nanmax(col_amp[lo:hi])) if lo < hi else 0.0
+        tri_count = max((hi - lo) * sub_len, 1)
+        tri_rms = float(np.sqrt(col_sqsum[lo:hi].sum() / tri_count))
+        col_max = float(col_amp[column]) if col_amp.size else 0.0
+        col_rms = float(np.sqrt(col_sqsum[column] / max(sub_len, 1)))
+        if scale_mode == "全局最大值":
+            scale = 1.0 / stats["slice_amp"] if stats["slice_amp"] > 1e-12 else 1.0
+        elif scale_mode == "三道最大值":
+            scale = 1.0 / tri_amp if tri_amp > 1e-12 else 1.0
+        elif scale_mode == "单道最大值":
+            scale = 1.0 / col_max if col_max > 1e-12 else 1.0
+        elif scale_mode == "全局均方根":
+            scale = 1.0 / stats["slice_rms"] if stats["slice_rms"] > 1e-12 else 1.0
+        elif scale_mode == "三道均方根":
+            scale = 1.0 / tri_rms if tri_rms > 1e-12 else 1.0
+        elif scale_mode == "单道均方根":
+            scale = 1.0 / col_rms if col_rms > 1e-12 else 1.0
+        elif scale_mode == "全局平均值":
+            scale = 1.0 / stats["slice_abs_mean"] if stats["slice_abs_mean"] > 1e-12 else 1.0
+        else:
+            scale = 1.0
+        return scale
 
+    def _decimate_raw_trace(self, trace: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Decimate a raw trace once (per rebuild); returns (x_time, envelope)."""
         sample_rate = self._metadata.sample_rate_hz
-        nframes = rows
+        if trace.size > self.MAX_WIGGLE_POINTS:
+            x_idx, envelope = _decimate_peaks(trace, self.MAX_WIGGLE_POINTS)
+            x_time = x_idx / sample_rate
+        else:
+            x_time = np.arange(trace.size, dtype=np.float64) / sample_rate
+            envelope = np.ascontiguousarray(trace)
+        return x_time, envelope
+
+    def _channel_display_arrays(self, index: int, stats: dict):
+        """Compute (x, y, fill) display arrays for a cached trace envelope."""
+        x_time, envelope, baseline = self._wiggle_display_cache[index]
+        if envelope is None:
+            return None, None, None
+        params = self._wiggle_params
+        channel = self._wiggle_stored_channels[index]
+        column = int(channel - self._y_start_point)
+        scale = self._select_wiggle_scale(column, stats)
         gain = 10.0 ** (float(params.get("gain_db") or 0.0) / 20.0)
-        flip = bool(params.get("flip"))
+        scaled = (envelope * (scale * gain)).astype(np.float32, copy=False)
+        scaled = np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0)
         clip = params.get("clip")
-        fill = bool(params.get("fill"))
-        fill_negative = bool(params.get("fill_negative"))
-        scale_mode = str(params.get("scale_mode") or "全局最大值")
+        if clip is not None and clip > 0:
+            np.clip(scaled, -clip, clip, out=scaled)
+        if params.get("flip"):
+            scaled = -scaled
+        y_plot = baseline + scaled
+        if params.get("fill"):
+            if params.get("fill_negative"):
+                fill_y = y_plot
+            else:
+                fill_y = baseline + np.maximum(scaled, 0.0)
+            return x_time, np.ascontiguousarray(y_plot), np.ascontiguousarray(fill_y)
+        return x_time, np.ascontiguousarray(y_plot), None
 
-        duration_s = self._metadata.duration_s
-        x_axis_display = [0.0, duration_s]
+    def _rebuild_wiggle(self, channels: list[int]) -> None:
+        self._clear_wiggle_items()
+        params = self._wiggle_params
+        stats = self._compute_wiggle_stats()
+        if stats is None or not channels:
+            return
 
-        black_pen = pg.mkPen(color="#000000", width=1.0)
-        gray_pen = pg.mkPen(color="#9aa0a6", width=0.8)
-        fill_brush = QBrush(QColor("#000000"))
-
-        raw_x = np.arange(nframes, dtype=np.float64) / sample_rate
-
-        for channel in channel_values:
+        matrix = stats["matrix"]
+        self._wiggle_display_cache = []
+        for channel in channels:
             column = int(channel - self._y_start_point)
             trace = matrix[:, column]
             if trace.shape[0] == 0:
+                self._wiggle_display_cache.append((None, None, float(channel)))
                 continue
+            x_time, envelope = self._decimate_raw_trace(trace)
+            # Mark envelopes that have no finite content so updates skip them.
+            if not np.isfinite(envelope).any():
+                envelope = np.zeros_like(envelope)
+            self._wiggle_display_cache.append((x_time, envelope, float(channel)))
+        self._wiggle_stored_channels = list(channels)
 
-            tri_amp, tri_rms = _column_tri(column)
-            col_max = float(col_amp[column]) if col_amp.size else 0.0
-            col_rms = float(np.sqrt(col_sqsum[column] / max(sub_len, 1)))
-            if scale_mode == "全局最大值":
-                scale = 1.0 / slice_amp if slice_amp > 1e-12 else 1.0
-            elif scale_mode == "三道最大值":
-                scale = 1.0 / tri_amp if tri_amp > 1e-12 else 1.0
-            elif scale_mode == "单道最大值":
-                scale = 1.0 / col_max if col_max > 1e-12 else 1.0
-            elif scale_mode == "全局均方根":
-                scale = 1.0 / slice_rms if slice_rms > 1e-12 else 1.0
-            elif scale_mode == "三道均方根":
-                scale = 1.0 / tri_rms if tri_rms > 1e-12 else 1.0
-            elif scale_mode == "单道均方根":
-                scale = 1.0 / col_rms if col_rms > 1e-12 else 1.0
-            elif scale_mode == "全局平均值":
-                scale = 1.0 / slice_abs_mean if slice_abs_mean > 1e-12 else 1.0
-            else:
-                scale = 1.0
+        duration_s = self._metadata.duration_s
+        x_axis_display = [0.0, duration_s]
+        black_pen = pg.mkPen(color="#000000", width=1.0)
+        gray_pen = pg.mkPen(color="#9aa0a6", width=0.8)
+        fill_brush = QBrush(QColor("#000000"))
+        fill = bool(params.get("fill"))
 
-            scaled = (trace * (scale * gain)).astype(np.float32, copy=False)
-            scaled = np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0)
-            if clip is not None and clip > 0:
-                np.clip(scaled, -clip, clip, out=scaled)
-            if flip:
-                scaled = -scaled
+        for index in range(len(channels)):
+            x_time, y_plot, fill_y = self._channel_display_arrays(index, stats)
+            if x_time is None:
+                continue
+            baseline = self._wiggle_display_cache[index][2]
 
-            baseline = float(channel)
-            trace_y = baseline + scaled
-            if trace_y.size > self.MAX_WIGGLE_POINTS:
-                x_plot, y_plot = _decimate_peaks(trace_y, self.MAX_WIGGLE_POINTS)
-                x_plot = x_plot / sample_rate
-            else:
-                x_plot = raw_x
-                y_plot = trace_y
-
-            trace_item = pg.PlotDataItem(
-                x=x_plot,
-                y=np.ascontiguousarray(y_plot),
-                pen=black_pen,
-            )
+            trace_item = pg.PlotDataItem(x=x_time, y=y_plot, pen=black_pen)
             self.plot_widget.addItem(trace_item)
             trace_item.setDownsampling(auto=True, method="peak")
             trace_item.setClipToView(True)
             self._wiggle_items.append(trace_item)
 
-            baseline_item = pg.PlotDataItem(
-                x=x_axis_display,
-                y=[baseline, baseline],
-                pen=gray_pen,
-            )
+            baseline_item = pg.PlotDataItem(x=x_axis_display, y=[baseline, baseline], pen=gray_pen)
             self.plot_widget.addItem(baseline_item)
             baseline_item.setClipToView(True)
             self._wiggle_baselines.append(baseline_item)
 
-            if fill:
-                fill_y = trace_y if fill_negative else baseline + np.maximum(scaled, 0.0)
-                if fill_y.size > self.MAX_WIGGLE_POINTS:
-                    fill_x, fill_y = _decimate_peaks(fill_y, self.MAX_WIGGLE_POINTS)
-                    fill_x = fill_x / sample_rate
-                else:
-                    fill_x = x_plot
+            if fill and fill_y is not None:
                 fill_item = pg.PlotDataItem(
-                    x=fill_x,
-                    y=np.ascontiguousarray(fill_y),
-                    pen=None,
-                    brush=fill_brush,
-                    fillLevel=baseline,
+                    x=x_time, y=fill_y, pen=None, brush=fill_brush, fillLevel=baseline
                 )
                 self.plot_widget.addItem(fill_item)
                 fill_item.setDownsampling(auto=True, method="peak")
                 fill_item.setClipToView(True)
                 fill_item.setZValue(-1)
                 self._wiggle_fills.append(fill_item)
+
+        self._wiggle_stored_fill = fill
+        self._wiggle_stored_fill_negative = bool(params.get("fill_negative"))
+
+    def _update_wiggle_data(self) -> None:
+        """Update existing wiggle items in place (gain/flip/clip/scale changes)."""
+        stats = self._compute_wiggle_stats()
+        if stats is None or not self._wiggle_stored_channels:
+            return
+        for index in range(len(self._wiggle_stored_channels)):
+            if index >= len(self._wiggle_items):
+                break
+            x_time, y_plot, fill_y = self._channel_display_arrays(index, stats)
+            if x_time is None:
+                continue
+            self._wiggle_items[index].setData(x=x_time, y=y_plot)
+            if self._wiggle_fills and index < len(self._wiggle_fills):
+                if fill_y is not None:
+                    self._wiggle_fills[index].setData(x=x_time, y=fill_y)
+                else:
+                    self._wiggle_fills[index].clear()
 
     def _on_scene_mouse_moved(self, pos) -> None:
         """Report (channel, distance, time, amplitude) on hover in wiggle mode."""
