@@ -7,7 +7,7 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QPen, QTransform
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
@@ -51,7 +51,7 @@ def _decimate_peaks(values: np.ndarray, max_points: int) -> tuple[np.ndarray, np
 class DistanceAxisItem(pg.AxisItem):
     """Left axis that shows tick labels as physical distance or channel number.
 
-    The underlying view coordinates stay in 1-based channel space (so zoom,
+    The underlying view coordinates stay in 0-based channel space (so zoom,
     pan, scrollbars and export logic are unchanged); only the tick placement
     and label formatting are switched.  In distance mode the tick positions
     are chosen so they fall on round distances computed from the trace
@@ -75,8 +75,8 @@ class DistanceAxisItem(pg.AxisItem):
         self.update()
 
     def _to_distance(self, channel_value: float) -> float:
-        """Distance in metres for a 1-based channel coordinate."""
-        return self._first_pos_m + (channel_value - 1.0) * self._spacing_m
+        """Distance in metres for a 0-based channel coordinate."""
+        return self._first_pos_m + channel_value * self._spacing_m
 
     def _display_value(self, distance_m: float) -> float:
         return distance_m / 1000.0 if self._unit == "km" else distance_m
@@ -93,7 +93,7 @@ class DistanceAxisItem(pg.AxisItem):
             spacing_dist_m = spacing_display * unit_factor
             channel_spacing = spacing_dist_m / self._spacing_m
             anchor_distance = (-self._first_pos_m) % spacing_dist_m
-            channel_offset = 1.0 + anchor_distance / self._spacing_m
+            channel_offset = anchor_distance / self._spacing_m
             converted.append((channel_spacing, channel_offset))
         return converted
 
@@ -170,16 +170,23 @@ class SpaceTimeView(QWidget):
         "单道均方根",
         "全局平均值",
     ]
-    MAX_WIGGLE_TRACES = 150
     MAX_WIGGLE_POINTS = 2000
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._arrival_sets: dict[tuple, dict[int, float]] = {}
+        self._arrival_key = None
+        self._arrival_path = None
+        self.arrivals: dict[int, float] = {}
+        self._arrival_items = {}
+        self._hover_channel = None
+        self._arrival_drag = None
+        self._arrival_erase = False
         self._metadata: Optional[FileMetadata] = None
         self._frame_data: Optional[np.ndarray] = None
-        self._y_start_point = 1
-        self._y_end_point = 1
-        self._waveform_point = 1
+        self._y_start_point = 0
+        self._y_end_point = 0
+        self._waveform_point = 0
         self._colormap_name = "jet"
         self._vmin: Optional[float] = None
         self._vmax: Optional[float] = None
@@ -218,6 +225,9 @@ class SpaceTimeView(QWidget):
         self.plot_widget = pg.PlotWidget(
             axisItems={"bottom": self.time_axis, "left": self.distance_axis}
         )
+        self.plot_widget.viewport().setMouseTracking(True)
+        self.plot_widget.viewport().installEventFilter(self)
+        self.plot_widget.setToolTip("多道波形：Ctrl+左键标注到时；按住拖过多道连续标注；悬停通道后 Ctrl+←/→ 按一个样本微调；Esc 清除最近到时，按住连续清除。")
         self.plot_widget.setBackground("w")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.15)
         self.plot_widget.setLabel("left", "Point Index")
@@ -318,6 +328,12 @@ class SpaceTimeView(QWidget):
         visible point slice is a view into it (no copy), and the image is
         decimated on the fly for display while keeping full resolution for zoom.
         """
+        # A reload can keep the same channels/fill settings while replacing
+        # the samples (e.g. selecting additional files). Cached envelopes and
+        # statistics belong to the previous dataset and must not be reused.
+        if self._arrival_path != metadata.file_path:
+            self.set_arrival_context((str(metadata.file_path),), metadata)
+        self._clear_wiggle_items()
         self._metadata = metadata
         self._frame_data = frame_data
         self._y_start_point = start_point
@@ -340,7 +356,7 @@ class SpaceTimeView(QWidget):
             xMin=0.0,
             xMax=metadata.duration_s,
             yMin=start_point,
-            yMax=end_point + 1,
+            yMax=end_point + metadata.channel_step,
         )
         self.waveform_plot.setLimits(xMin=0.0, xMax=metadata.duration_s)
 
@@ -348,6 +364,144 @@ class SpaceTimeView(QWidget):
         self._update_waveform_curve()
         self.reset_view(clear_history=True)
         self._sync_visible_items()
+        self._refresh_arrival_items()
+
+    def set_arrival_context(self, key: tuple, metadata: FileMetadata) -> None:
+        self._arrival_key = key
+        self._arrival_path = metadata.file_path
+        if key not in self._arrival_sets:
+            self._arrival_sets[key] = dict(metadata.arrivals)
+        self.arrivals = self._arrival_sets[key]
+        self._arrival_drag = None
+        self._hover_channel = None
+        self._refresh_arrival_items()
+
+    def clear_arrivals(self) -> None:
+        self.arrivals.clear()
+        self._refresh_arrival_items()
+
+    def undo_latest_arrival(self) -> bool:
+        """Remove the most recently edited channel; key-repeat calls remove more."""
+        if not self.arrivals:
+            return False
+        channel, _time_s = self.arrivals.popitem()
+        self._refresh_arrival_items()
+        self.cursor_info.emit(f"已清除通道 {channel} 的最近到时；剩余 {len(self.arrivals)} 个标记。")
+        return True
+
+    def _nearest_channel(self, y: float):
+        if self._metadata is None:
+            return None
+        meta = self._metadata
+        index = int(np.floor((y - meta.channel_start) / meta.channel_step + 0.5))
+        channel = meta.channel_start + index * meta.channel_step
+        if not 0 <= index < meta.points or not self._y_start_point <= channel <= self._y_end_point:
+            return None
+        return channel
+
+    def mark_arrival(self, channel: int, time_s: float) -> None:
+        if self._metadata is None:
+            return
+        self._metadata.channel_index(channel)
+        last = (self._metadata.frame_count - 1) / self._metadata.sample_rate_hz
+        # Reinsertion makes dictionary order reflect the latest edit per channel.
+        self.arrivals.pop(channel, None)
+        self.arrivals[channel] = float(np.clip(time_s, 0.0, last))
+        self._refresh_arrival_items()
+
+    def mark_arrival_segment(self, first: tuple, last: tuple) -> None:
+        """Interpolate channels skipped by mouse-move coalescing."""
+        ch0, t0 = first
+        ch1, t1 = last
+        step = self._metadata.channel_step
+        direction = step if ch1 >= ch0 else -step
+        for ch in range(ch0, ch1 + direction, direction):
+            fraction = (ch - ch0) / (ch1 - ch0) if ch1 != ch0 else 1.0
+            time_s = t0 + fraction * (t1 - t0)
+            last_sample = (self._metadata.frame_count-1)/self._metadata.sample_rate_hz
+            self.arrivals.pop(ch, None)
+            self.arrivals[ch] = float(np.clip(time_s, 0, last_sample))
+        self._refresh_arrival_items()
+
+    def adjust_hovered_arrival(self, direction: int) -> bool:
+        channel = self._hover_channel
+        if self._plot_mode != "wiggle" or channel not in self.arrivals or self._metadata is None:
+            return False
+        self.mark_arrival(channel, self.arrivals[channel] + direction / self._metadata.sample_rate_hz)
+        self.cursor_info.emit(f"通道 {channel} 到时 {self.arrivals[channel]:.6f} s")
+        return True
+
+    def erase_arrival_segment(self, first: int, last: int) -> None:
+        """Erase actual channels crossed, including coalesced mouse moves."""
+        low, high = sorted((first, last))
+        for channel in list(self.arrivals):
+            if low <= channel <= high:
+                del self.arrivals[channel]
+        self._refresh_arrival_items()
+
+    def _refresh_arrival_items(self) -> None:
+        for channel in list(self._arrival_items):
+            if channel not in self.arrivals:
+                self.plot_widget.removeItem(self._arrival_items.pop(channel))
+        for channel, time_s in self.arrivals.items():
+            item = self._arrival_items.get(channel)
+            if item is None:
+                item = pg.PlotCurveItem(pen=pg.mkPen("#e02020", width=2))
+                item.setZValue(100)
+                self.plot_widget.addItem(item)
+                self._arrival_items[channel] = item
+            half = 0.38 * (self._metadata.channel_step if self._metadata else 1)
+            item.setData(x=[time_s, time_s], y=[channel-half, channel+half])
+            item.setVisible(self._plot_mode == "wiggle" and self._y_start_point <= channel <= self._y_end_point)
+
+    def eventFilter(self, watched, event):
+        if watched is self.plot_widget.viewport():
+            kind = event.type()
+            if kind == QEvent.Leave:
+                self._hover_channel = None
+            if kind in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease):
+                scene = self.plot_widget.mapToScene(event.pos())
+                vb = self.plot_widget.getViewBox()
+                point = vb.mapSceneToView(scene)
+                inside = vb.sceneBoundingRect().contains(scene)
+                channel = self._nearest_channel(point.y()) if inside else None
+                self._hover_channel = channel
+                ctrl = bool(event.modifiers() & Qt.ControlModifier)
+                erase = bool(event.modifiers() & Qt.ShiftModifier)
+                if self._plot_mode == "wiggle":
+                    if kind == QEvent.MouseButtonPress and event.button() == Qt.LeftButton and ctrl:
+                        self.plot_widget.setFocus()
+                        self._arrival_erase = erase
+                        if channel is not None:
+                            if erase:
+                                self.erase_arrival_segment(channel, channel)
+                            else:
+                                self.mark_arrival(channel, point.x())
+                            self._arrival_drag = (channel, point.x())
+                        return True
+                    if kind == QEvent.MouseMove and self._arrival_drag is not None:
+                        if ctrl and erase == self._arrival_erase and event.buttons() & Qt.LeftButton:
+                            # Keep a held gesture active outside the plot; re-entry
+                            # resumes marking rather than starting rectangle zoom.
+                            if channel is not None:
+                                current = (channel, point.x())
+                                if erase:
+                                    self.erase_arrival_segment(self._arrival_drag[0], channel)
+                                else:
+                                    self.mark_arrival_segment(self._arrival_drag, current)
+                                self._arrival_drag = current
+                        else:
+                            self._arrival_drag = None
+                        return True
+                    if kind == QEvent.MouseButtonRelease and self._arrival_drag is not None:
+                        if ctrl and erase == self._arrival_erase and channel is not None:
+                            if erase:
+                                self.erase_arrival_segment(self._arrival_drag[0], channel)
+                            else:
+                                self.mark_arrival_segment(self._arrival_drag, (channel, point.x()))
+                        self._arrival_drag = None
+                        return True
+        return super().eventFilter(watched, event)
 
     def update_waveform_point(self, waveform_point: int) -> None:
         """Update the waveform subplot to show a different point."""
@@ -390,7 +544,7 @@ class SpaceTimeView(QWidget):
         self._tracking_enabled = False
         try:
             self.plot_widget.setXRange(0.0, self._metadata.duration_s, padding=0.0)
-            self.plot_widget.setYRange(self._y_start_point, self._y_end_point + 1, padding=0.0)
+            self.plot_widget.setYRange(self._y_start_point, self._y_end_point + self._metadata.channel_step, padding=0.0)
             current = self.current_ranges()
             self._default_range = current
             self._last_view_range = current
@@ -472,11 +626,16 @@ class SpaceTimeView(QWidget):
         # Keep the single-trace plot and the lower plot the same width: the
         # noise map hides the histogram, so drop the matching right spacer too.
         self.waveform_right_spacer.setVisible(image_mode)
+        self._refresh_arrival_items()
         if image_mode:
             for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
                 item.setVisible(False)
         else:
             self._refresh_wiggle()
+            # The fast update path reuses items hidden by image mode;
+            # setData() does not restore their visibility.
+            for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
+                item.setVisible(True)
 
     def _schedule_wiggle_refresh(self, *_args) -> None:
         if self._plot_mode != "wiggle":
@@ -496,8 +655,8 @@ class SpaceTimeView(QWidget):
                 viewbox_height_px = 600.0
             y_span = max(rect.height(), 1e-9)
             channels_per_pixel = y_span / viewbox_height_px
-            return max(1, int(round(pixels * channels_per_pixel)))
-        return max(1, int(round(params.get("spacing_value") or 1)))
+            return max(1, int(round(pixels * channels_per_pixel / self._metadata.channel_step))) * self._metadata.channel_step
+        return max(1, int(round(params.get("spacing_value") or 1))) * self._metadata.channel_step
 
     def _refresh_wiggle(self) -> None:
         """Refresh the multi-channel wiggle profile.
@@ -525,20 +684,20 @@ class SpaceTimeView(QWidget):
 
     def _clear_wiggle_items(self) -> None:
         for item in [*self._wiggle_items, *self._wiggle_fills, *self._wiggle_baselines]:
-            self.plot_widget.removeItem(item)
+            self.plot_widget.getViewBox().removeItem(item)
         self._wiggle_items.clear()
         self._wiggle_fills.clear()
         self._wiggle_baselines.clear()
         self._wiggle_stored_channels = []
+        self._wiggle_display_cache = []
+        self._w_stats_key = None
+        self._w_stats = None
 
     def _compute_wiggle_channels(self) -> list[int]:
         step = self._wiggle_spacing_step()
         channels = np.arange(self._y_start_point, self._y_end_point + 1, step, dtype=int)
         if channels.size == 0:
             return []
-        if channels.size > self.MAX_WIGGLE_TRACES:
-            extra = int(np.ceil(channels.size / self.MAX_WIGGLE_TRACES)) * step
-            channels = np.arange(self._y_start_point, self._y_end_point + 1, extra, dtype=int)
         return [int(c) for c in channels]
 
     def _compute_wiggle_stats(self):
@@ -552,9 +711,9 @@ class SpaceTimeView(QWidget):
             return None
         key = (id(data), self._y_start_point, self._y_end_point)
         if self._w_stats_key == key and self._w_stats is not None:
-            self._w_stats["matrix"] = data[:, slice(self._y_start_point - 1, self._y_end_point)]
+            self._w_stats["matrix"] = data[:, self._metadata.channel_slice(self._y_start_point, self._y_end_point)]
             return self._w_stats
-        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        point_slice = self._metadata.channel_slice(self._y_start_point, self._y_end_point)
         matrix = data[:, point_slice]
         if matrix.size == 0:
             return None
@@ -631,7 +790,7 @@ class SpaceTimeView(QWidget):
             return None, None, None
         params = self._wiggle_params
         channel = self._wiggle_stored_channels[index]
-        column = int(channel - self._y_start_point)
+        column = int((channel - self._y_start_point) // self._metadata.channel_step)
         scale = self._select_wiggle_scale(column, stats)
         gain = 10.0 ** (float(params.get("gain_db") or 0.0) / 20.0)
         scaled = (envelope * (scale * gain)).astype(np.float32, copy=False)
@@ -660,7 +819,7 @@ class SpaceTimeView(QWidget):
         matrix = stats["matrix"]
         self._wiggle_display_cache = []
         for channel in channels:
-            column = int(channel - self._y_start_point)
+            column = int((channel - self._y_start_point) // self._metadata.channel_step)
             trace = matrix[:, column]
             if trace.shape[0] == 0:
                 self._wiggle_display_cache.append((None, None, float(channel)))
@@ -679,6 +838,10 @@ class SpaceTimeView(QWidget):
         fill_brush = QBrush(QColor("#000000"))
         fill = bool(params.get("fill"))
 
+        # These items have explicit data/settings and no legend/averaging.
+        # Add directly to the ViewBox: PlotItem.addItem reprocesses all curves
+        # on every insertion, which becomes quadratic for hundreds of traces.
+        view_box = self.plot_widget.getViewBox()
         for index in range(len(channels)):
             x_time, y_plot, fill_y = self._channel_display_arrays(index, stats)
             if x_time is None:
@@ -686,18 +849,18 @@ class SpaceTimeView(QWidget):
             baseline = self._wiggle_display_cache[index][2]
 
             trace_item = pg.PlotDataItem(x=x_time, y=y_plot, pen=black_pen)
-            self.plot_widget.addItem(trace_item)
+            view_box.addItem(trace_item, ignoreBounds=True)
             self._wiggle_items.append(trace_item)
 
             baseline_item = pg.PlotDataItem(x=x_axis_display, y=[baseline, baseline], pen=gray_pen)
-            self.plot_widget.addItem(baseline_item)
+            view_box.addItem(baseline_item, ignoreBounds=True)
             self._wiggle_baselines.append(baseline_item)
 
             if fill and fill_y is not None:
                 fill_item = pg.PlotDataItem(
                     x=x_time, y=fill_y, pen=None, brush=fill_brush, fillLevel=baseline
                 )
-                self.plot_widget.addItem(fill_item)
+                view_box.addItem(fill_item, ignoreBounds=True)
                 fill_item.setZValue(-1)
                 self._wiggle_fills.append(fill_item)
 
@@ -729,18 +892,19 @@ class SpaceTimeView(QWidget):
         if self._metadata is None or self._frame_data is None:
             return
         view_point = self.plot_widget.getPlotItem().vb.mapSceneToView(pos)
-        channel = int(round(view_point.y()))
-        if channel < 1 or channel > self._frame_data.shape[1]:
+        channel = self._nearest_channel(view_point.y())
+        if channel is None:
             return
         clamped_time = min(max(view_point.x(), 0.0), self._metadata.duration_s)
         frame = int(clamped_time * self._metadata.sample_rate_hz)
         frame = min(max(frame, 0), self._frame_data.shape[0] - 1)
-        amplitude = float(self._frame_data[frame, channel - 1])
+        amplitude = float(self._frame_data[frame, self._metadata.channel_index(channel)])
         spacing_m = getattr(self.distance_axis, "_spacing_m", 5.0) or 5.0
         first_pos_m = getattr(self.distance_axis, "_first_pos_m", 0.0) or 0.0
-        distance = first_pos_m + (channel - 1) * spacing_m
+        distance = first_pos_m + channel * spacing_m
         self.cursor_info.emit(
             f"道号 {channel:g} | 距离 {distance:g} m | 时间 {clamped_time:.3f} s | 振幅 {amplitude:.4g} rad"
+            + (f" | 到时 {self.arrivals[channel]:.6f} s" if channel in self.arrivals else "")
         )
 
     def _update_waveform_curve(self) -> None:
@@ -748,7 +912,7 @@ class SpaceTimeView(QWidget):
             self.waveform_curve.clear()
             return
 
-        point_index = self._y_start_point - 1 + (self._waveform_point - self._y_start_point)
+        point_index = self._metadata.channel_index(self._waveform_point)
         if point_index < 0 or point_index >= self._frame_data.shape[1]:
             self.waveform_curve.clear()
             return
@@ -794,12 +958,12 @@ class SpaceTimeView(QWidget):
         if self._metadata is None or self._frame_data is None:
             return
 
-        npoints = self._y_end_point - self._y_start_point + 1
+        npoints = (self._y_end_point - self._y_start_point) // self._metadata.channel_step + 1
         if npoints < 1:
             return
 
         frame_slice = slice(0, self._frame_data.shape[0]) if full else self._frame_slice_for_view()
-        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        point_slice = self._metadata.channel_slice(self._y_start_point, self._y_end_point)
         frame0 = max(0, frame_slice.start or 0)
 
         image_pt = self._frame_data[frame_slice, point_slice].T
@@ -821,7 +985,7 @@ class SpaceTimeView(QWidget):
 
         transform = QTransform()
         transform.translate(frame0 / self._metadata.sample_rate_hz, self._y_start_point)
-        transform.scale(samples_per_col / self._metadata.sample_rate_hz, 1.0)
+        transform.scale(samples_per_col / self._metadata.sample_rate_hz, self._metadata.channel_step)
         self.image_item.setTransform(transform)
         self._applied_image_key = key
 
@@ -877,7 +1041,7 @@ class SpaceTimeView(QWidget):
         if self._metadata is None or self._frame_data is None:
             return None
 
-        point_slice = slice(self._y_start_point - 1, self._y_end_point)
+        point_slice = self._metadata.channel_slice(self._y_start_point, self._y_end_point)
         data = self._frame_data[:, point_slice]
         if data.size == 0:
             return None

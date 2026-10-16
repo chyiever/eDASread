@@ -32,6 +32,7 @@ from scripts.ui.control_panel import format_filter_text, parse_filter_text
 from scripts.render.plot_style import AXIS_TEXT_COLOR, style_axis
 from scripts.render.space_time_view import COLOR_MAPS
 from scripts.render.time_axis import TimeAxisItem
+from scripts.ui.control_scroll import ControlScrollArea
 
 
 CURVE_COLORS = [
@@ -181,7 +182,8 @@ class ChannelAnalysisView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.channels_edit = QLineEdit("5,10,15")
+        self.channels_edit = QLineEdit("4,9,14")
+        self.channels_edit.setToolTip("通道编号从 0 开始，有效范围为 0~(通道数-1)，范围包含两端。")
         self.psd_nperseg_edit = QLineEdit("auto")
         self.psd_overlap_edit = QLineEdit("50")
         self.psd_fmin_edit = QLineEdit()
@@ -220,18 +222,19 @@ class ChannelAnalysisView(QWidget):
             edit.setFixedWidth(72)
         controls = QGroupBox("通道分析")
         controls.setFont(ui_font)
-        controls_layout = QHBoxLayout(controls)
+        controls_layout = QGridLayout(controls)
         controls_layout.setContentsMargins(8, 6, 8, 6)
         controls_layout.setSpacing(8)
-        controls_layout.addWidget(self._labeled_widget("通道", self.channels_edit))
-        controls_layout.addWidget(self._labeled_widget("PSD窗长", self.psd_nperseg_edit))
-        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.psd_overlap_edit))
-        controls_layout.addWidget(self._labeled_widget("FMin", self.psd_fmin_edit))
-        controls_layout.addWidget(self._labeled_widget("FMax", self.psd_fmax_edit))
-        controls_layout.addWidget(self._labeled_widget("PSD Min", self.psd_ymin_edit))
-        controls_layout.addWidget(self._labeled_widget("PSD Max", self.psd_ymax_edit))
-        controls_layout.addWidget(self.plot_button)
-        controls_layout.addStretch(1)
+        controls_layout.addWidget(self._labeled_widget("通道", self.channels_edit), 0, 0)
+        controls_layout.addWidget(self._labeled_widget("PSD窗长", self.psd_nperseg_edit), 0, 1)
+        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.psd_overlap_edit), 0, 2)
+        controls_layout.addWidget(self._labeled_widget("FMin", self.psd_fmin_edit), 0, 3)
+        controls_layout.addWidget(self._labeled_widget("FMax", self.psd_fmax_edit), 0, 4)
+        controls_layout.addWidget(self._labeled_widget("PSD Min", self.psd_ymin_edit), 1, 0)
+        controls_layout.addWidget(self._labeled_widget("PSD Max", self.psd_ymax_edit), 1, 1)
+        controls_layout.addWidget(self.plot_button, 1, 2)
+        controls_layout.setColumnStretch(5, 1)
+
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self._time_view_box = TimeSelectionViewBox()
@@ -303,7 +306,7 @@ class ChannelAnalysisView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(controls)
+        layout.addWidget(ControlScrollArea(controls))
         layout.addWidget(plot_splitter, 1)
 
         self.plot_button.clicked.connect(self.plot_requested)
@@ -329,8 +332,7 @@ class ChannelAnalysisView(QWidget):
 
         matrix = np.asarray(data, dtype=np.float32)
         for channel in channel_list:
-            if channel < 1 or channel > matrix.shape[1]:
-                raise ValueError(f"通道 {channel} 超出有效范围 1-{matrix.shape[1]}。")
+            metadata.channel_index(channel)
 
         self._metadata = metadata
         self._data = matrix
@@ -348,7 +350,7 @@ class ChannelAnalysisView(QWidget):
     def _prepare_traces(self) -> None:
         self._traces = []
         for channel in self._channels:
-            trace = np.asarray(self._data[:, channel - 1], dtype=np.float32)
+            trace = np.asarray(self._data[:, self._metadata.channel_index(channel)], dtype=np.float32)
             self._traces.append(trace - robust_median(trace))
         self._offset_step = self._resolve_offset_step(self._traces)
 
@@ -599,7 +601,8 @@ class FkSpectrumView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.channel_range_edit = QLineEdit("5-100")
+        self.channel_range_edit = QLineEdit("4-99")
+        self.channel_range_edit.setToolTip("通道编号从 0 开始，有效范围为 0~(通道数-1)，范围包含两端。")
         self.spacing_edit = QLineEdit("5")
         self.spatial_taper_edit = QLineEdit("0")
         self.temporal_taper_edit = QLineEdit("0.05")
@@ -650,7 +653,7 @@ class FkSpectrumView(QWidget):
 
         controls = QGroupBox("f-k 谱")
         controls.setFont(ui_font)
-        controls_layout = QHBoxLayout(controls)
+        controls_layout = QGridLayout(controls)
         controls_layout.setContentsMargins(8, 6, 8, 6)
         controls_layout.setSpacing(8)
 
@@ -667,18 +670,19 @@ class FkSpectrumView(QWidget):
             edit.setFixedWidth(104)
         self.plot_button.setFixedWidth(96)
 
-        controls_layout.addWidget(self._labeled_widget("通道范围", self.channel_range_edit))
-        controls_layout.addWidget(self._labeled_widget("间距(m)", self.spacing_edit))
-        controls_layout.addWidget(self._labeled_widget("空间taper", self.spatial_taper_edit))
-        controls_layout.addWidget(self._labeled_widget("时间taper", self.temporal_taper_edit))
-        controls_layout.addWidget(self._labeled_widget("NFFT-K", self.nfft_channels_edit))
-        controls_layout.addWidget(self._labeled_widget("NFFT-T", self.nfft_samples_edit))
-        controls_layout.addWidget(self.remove_bg_checkbox)
-        controls_layout.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit))
-        controls_layout.addWidget(self._labeled_widget("K(a~b)", self.k_range_edit))
-        controls_layout.addWidget(self._labeled_widget("V(dB)", self.v_range_edit))
-        controls_layout.addWidget(self.plot_button)
-        controls_layout.addStretch(1)
+        controls_layout.addWidget(self._labeled_widget("通道范围", self.channel_range_edit), 0, 0)
+        controls_layout.addWidget(self._labeled_widget("间距(m)", self.spacing_edit), 0, 1)
+        controls_layout.addWidget(self._labeled_widget("空间taper", self.spatial_taper_edit), 0, 2)
+        controls_layout.addWidget(self._labeled_widget("时间taper", self.temporal_taper_edit), 0, 3)
+        controls_layout.addWidget(self._labeled_widget("NFFT-K", self.nfft_channels_edit), 0, 4)
+        controls_layout.addWidget(self._labeled_widget("NFFT-T", self.nfft_samples_edit), 0, 5)
+        controls_layout.addWidget(self.remove_bg_checkbox, 0, 6)
+        controls_layout.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit), 1, 0)
+        controls_layout.addWidget(self._labeled_widget("K(a~b)", self.k_range_edit), 1, 1)
+        controls_layout.addWidget(self._labeled_widget("V(dB)", self.v_range_edit), 1, 2)
+        controls_layout.addWidget(self.plot_button, 1, 3)
+        controls_layout.setColumnStretch(7, 1)
+
 
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("w")
@@ -719,7 +723,7 @@ class FkSpectrumView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(controls)
+        layout.addWidget(ControlScrollArea(controls))
         layout.addWidget(plot_row, 1)
 
         self.plot_button.clicked.connect(self.plot_requested)
@@ -863,7 +867,8 @@ class TimeFrequencyAnalysisView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.channel_edit = QLineEdit("1")
+        self.channel_edit = QLineEdit("0")
+        self.channel_edit.setToolTip("通道编号从 0 开始，有效范围为 0~(通道数-1)，范围包含两端。")
         self.filter_type_combo = QComboBox()
         self.filter_type_combo.addItems(["none", "lowpass", "highpass", "bandpass"])
         self.filter_type_combo.setCurrentText("none")
@@ -928,26 +933,33 @@ class TimeFrequencyAnalysisView(QWidget):
 
         controls = QGroupBox("Tab4 时域/时频参数")
         controls.setFont(ui_font)
-        controls_layout = QHBoxLayout(controls)
+        controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(6, 4, 6, 4)
-        controls_layout.setSpacing(8)
-        controls_layout.addWidget(self._labeled_widget("通道", self.channel_edit))
-        controls_layout.addWidget(self._labeled_widget("滤波(A~B)", self.filter_edit))
-        controls_layout.addWidget(self._labeled_widget("模式", self.tf_mode_combo))
-        controls_layout.addWidget(self._labeled_widget("数值", self.tf_scale_combo))
-        controls_layout.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit))
-        controls_layout.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit))
-        controls_layout.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit))
-        controls_layout.addWidget(self._labeled_widget("V(a~b)", self.v_range_edit))
-        controls_layout.addWidget(self._labeled_widget("显示窗口(s)", self.visible_window_seconds_edit))
-        controls_layout.addWidget(self._labeled_widget("Colormap", self.colormap_combo))
-        controls_layout.addWidget(self.auto_color_checkbox)
-        controls_layout.addWidget(self.apply_color_button)
-        controls_layout.addWidget(self.plot_button)
-        controls_layout.addStretch(1)
+        controls_layout.setSpacing(4)
+        first_row = QHBoxLayout()
+        second_row = QHBoxLayout()
+        first_row.setSpacing(8)
+        second_row.setSpacing(8)
+        controls_layout.addLayout(first_row)
+        controls_layout.addLayout(second_row)
+        first_row.addWidget(self._labeled_widget("通道", self.channel_edit))
+        first_row.addWidget(self._labeled_widget("滤波(A~B)", self.filter_edit))
+        first_row.addWidget(self._labeled_widget("模式", self.tf_mode_combo))
+        first_row.addWidget(self._labeled_widget("数值", self.tf_scale_combo))
+        first_row.addWidget(self._labeled_widget("窗长(s)", self.window_seconds_edit))
+        first_row.addWidget(self._labeled_widget("重叠(%)", self.overlap_percent_edit))
+        second_row.addWidget(self._labeled_widget("F(a~b)", self.f_range_edit))
+        second_row.addWidget(self._labeled_widget("V(a~b)", self.v_range_edit))
+        second_row.addWidget(self._labeled_widget("窗口(s)", self.visible_window_seconds_edit))
+        second_row.addWidget(self._labeled_widget("色表", self.colormap_combo))
+        second_row.addWidget(self.auto_color_checkbox)
+        second_row.addWidget(self.apply_color_button)
+        second_row.addWidget(self.plot_button)
+        first_row.addStretch(1)
+        second_row.addStretch(1)
 
         self._metadata: FileMetadata | None = None
-        self._channel = 1
+        self._channel = 0
         self._trace: np.ndarray | None = None
         self._tf_log_bounds: tuple[float, float] | None = None
         self._active_plot: pg.PlotWidget | None = None
@@ -955,6 +967,7 @@ class TimeFrequencyAnalysisView(QWidget):
         self._display_values: np.ndarray | None = None
 
         self.time_axis = TimeAxisItem(orientation="bottom")
+
         self.time_plot = pg.PlotWidget(axisItems={"bottom": self.time_axis})
         self.time_plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.time_plot.setMinimumHeight(180)
@@ -1035,7 +1048,7 @@ class TimeFrequencyAnalysisView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(controls)
+        layout.addWidget(ControlScrollArea(controls))
         layout.addWidget(plot_splitter, 1)
 
         self._active_plot: pg.PlotWidget | None = self.time_plot

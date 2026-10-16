@@ -23,13 +23,13 @@ from scripts.io.bz_codec import (
 )
 
 POINTS_PATTERN = re.compile(r"-(\d+)pt-")
-SCAN_RATE_PATTERN = re.compile(r"-(\d+)Hz-")
+SCAN_RATE_PATTERN = re.compile(r"-(\d+(?:\.\d+)?)Hz-")
 TIMESTAMP_PATTERN = re.compile(r"-(\d{8}T\d{6}(?:\.\d+)?)\.(?:bin|bz|bzs)$", re.IGNORECASE)
 LEADING_TOKEN_PATTERN = re.compile(r"^([^-]+)-")
 PHASE_RAD_SCALE = np.float32(np.pi / 32767.0)
 RAW_DTYPE = np.int32
 RAW_BYTES_PER_POINT = np.dtype(RAW_DTYPE).itemsize
-DATA_SUFFIXES = {".bin", *BZ_SUFFIXES}
+DATA_SUFFIXES = {".bin", ".npz", *BZ_SUFFIXES}
 
 
 def list_bin_files(folder_path: str | Path) -> list[Path]:
@@ -76,6 +76,9 @@ def inspect_bin_file(file_path: str | Path) -> FileMetadata:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
+    if path.suffix.lower() == ".npz":
+        from scripts.io.npz_codec import inspect_edas_npz
+        return inspect_edas_npz(path)
     if is_bz_path(path):
         return _inspect_bz_file(path)
 
@@ -182,7 +185,7 @@ def build_export_filename(
     else:
         start_text = "unknown"
 
-    sample_rate_text = f"{int(round(metadata.sample_rate_hz))}Hz"
+    sample_rate_text = f"{metadata.sample_rate_hz:.12f}".rstrip("0").rstrip(".") + "Hz"
     normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     prefix = ""
     if preserve_leading_token:
@@ -194,6 +197,9 @@ def build_export_filename(
 
 def read_bin_memmap(metadata: FileMetadata) -> np.ndarray:
     """Read a phase data file as a 2D int32 array shaped as frames x points."""
+    if metadata.file_path.suffix.lower() == ".npz":
+        from scripts.io.npz_codec import read_edas_npz
+        return read_edas_npz(metadata.file_path)[0]
     if is_bz_path(metadata.file_path):
         return read_bz_file(metadata.file_path)
 

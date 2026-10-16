@@ -33,7 +33,8 @@ def _resolve_logo_path() -> Path | None:
 def main() -> int:
     """Launch the desktop application."""
     app = QApplication(sys.argv)
-    app.setApplicationName("eDASread")
+    app.setApplicationName("eDASpy")
+    app.setApplicationDisplayName("eDAS数据处理软件（eDASpy ）")
     app.setOrganizationName("eDASread")
 
     logo_path = _resolve_logo_path()

@@ -1,4 +1,4 @@
-"""Build a single-file Windows executable for eDASread with PyInstaller.
+"""Build a single-file Windows executable for eDASpy with PyInstaller.
 
 Run from the project root:  python build_exe.py
 """
@@ -56,7 +56,7 @@ def _find_zstd_dll() -> Path | None:
 def _unique_output_name(dist_dir: Path) -> str:
     """Return a dated executable stem that will not overwrite an existing exe."""
     date_text = datetime.now().strftime("%Y%m%d")
-    base_name = f"eDASread-{date_text}"
+    base_name = f"eDASpy-{date_text}"
     candidate = base_name
     counter = 2
     while (dist_dir / f"{candidate}.exe").exists():

@@ -1,122 +1,35 @@
-﻿# eDASread 文档总览（合并版）
+# eDASpy 文档入口
 
-本文档为原 `architecture.md`、`README.md`、`run_guide.md` 的合并版本，面向使用者与维护者，覆盖软件结构、运行方式、核心能力与操作流程。
+完整操作手册已集中到项目根目录 [README](../README.md)，按当前界面详细说明每个页面的参数、默认值、可设置范围、生效方式和操作步骤。
 
-## 1. 项目简介
+## 按功能查阅
 
-`eDASread` 是一个基于 PyQt5 的桌面程序，用于 `.bin` 格式 eDAS 数据的浏览、可视化、滤波与当前视图导出。
+| 需要完成的任务 | 文档入口 |
+| --- | --- |
+| 调整文字大小（默认18px）、保存设置 | [全局设置](../README.md#settings) |
+| 理解 0-based 通道号、NPZ 原始通道映射、时间与数据单位 | [共同约定与页面关系](../README.md#overview) |
+| 选目录、刷新/F5、万级文件分页、多选拼接、批量 BIN→BZ | [文件浏览与压缩](../README.md#files) |
+| 基础滤波、去噪、坐标、Wiggle、事件到时与 Esc 撤销 | [Tab1 数据处理](../README.md#tab1) |
+| 多通道时域、完整/局部时间段 PSD | [Tab2 时域与 PSD](../README.md#tab2) |
+| 通道范围、taper、FFT 长度、频率/波数显示与色阶 | [Tab3 f-k 谱](../README.md#tab3) |
+| 单道附加滤波、时频窗长、显示窗口、色阶与时间联动 | [Tab4 时域与时频](../README.md#tab4) |
+| 相位/能量转换、块平均、通道均衡、车辆折线标记与 JSON/CSV | [Tab5 轨迹标记](../README.md#tab5) |
+| 裁剪、时间/空间抽取、原始/处理后导出、NPZ 重新读取 | [数据导出](../README.md#exports) |
+| 快捷键、完整工作流、错误排查 | [操作速查](../README.md#shortcuts)、[常见问题](../README.md#faq) |
+| 安装、启动、构建新 exe | [运行与打包](../README.md#install) |
 
-主要能力：
-- 自动扫描目录内 `.bin` 文件并分页浏览
-- 从文件名解析采样率、点数、时间戳
-- Time-space 图 + 指定点时域波形联动显示
-- 低通/高通/带通快速滤波
-- Tab1 交互式数据预处理：去尖峰/共模/随机噪声、FK 滤波
-- Tab2 多通道时域图与 PSD(dB) 绘制
-- Tab3 指定通道范围 f-k 谱绘制
-- Tab4 单通道时域波形与短时时频图绘制（对数频率轴）
-- 当前视图窗口导出（原始或滤波后）
-- 空文件（0 字节）或无完整数据帧的文件会被直接拒绝并给出简洁错误提示
+## 参数与格式参考
 
-## 2. 运行环境
+- [参数默认值与输入范围](参数默认值与输入范围.md)：便于快速核对数值。
+- [事件到时标注与 NPZ 格式](事件到时标注与NPZ格式.md)：字段定义、时间参考、校验与 Python 读取示例。
 
-推荐依赖（完整清单见项目根目录 `requirements.txt`）：
+## 开发与验收记录
 
-```bash
-pip install -r requirements.txt
-```
+- [2026-10-16 eDAS 到时标注功能开发](2026-10-16-eDAS到时标注功能开发.md)
+- [GUI 布局优化记录](20261012-GUI布局优化文档.md)
+- [Wiggle 剖面开发记录](20261012-波形变面积Wiggle剖面开发文档.md)
+- [预处理开发说明](preprocessing_development.md)
+- [界面设置与文件列表性能优化](2026-10-16-界面设置与文件列表性能优化.md)
+- [开发日志](dev_log.md)
 
-核心运行时依赖：`PyQt5`、`pyqtgraph`、`numpy`、`scipy`；可选 `python-zstandard`（`.bz/.bzs` 压缩格式，缺失时尝试加载 `zstd.dll`）。
-
-启动方式（项目根目录）：
-
-```bash
-python run.py
-```
-
-打包单文件 exe（项目根目录，exe 名自动包含打包日期，完成后自动清理 `build/` 等临时文件）：
-
-```bash
-python build_exe.py
-```
-
-## 3. 当前界面结构
-
-- 顶部标题栏：左侧 logo，中部标题
-- 状态栏：右侧固定文字“中国科学院半导体所开发”
-- 左侧：文件浏览区（每页 100）
-- 右侧上部：参数与导出区（两列）
-  - 左列：Display Range（含 Actions 行）
-  - 右列：Filter + Export
-- 右侧下部：双图
-  - 上：指定位置点时域波形
-  - 下：time-space 图（右侧色标）
-
-## 4. 文件与数据模型
-
-文件名要求：
-- 包含 `-xxxHz-`（采样率）
-- 包含 `-xxxpt-`（点数）
-- 可选结尾时间戳 `-YYYYMMDDTHHMMSS(.fff).bin`
-
-二进制格式：
-- `int32`，4 字节/采样点
-- 逻辑矩阵：`frame_count x points`
-- 存储顺序：frame-major
-
-单位换算：
-- 显示/滤波：`raw -> rad`
-- 导出滤波后：`rad -> raw int32`
-
-## 5. 交互与操作流程
-
-1. 选择或输入数据目录
-2. 选择目标文件
-3. 设置 Display Range / Filter 参数
-4. 输入指定位置点（可滚轮 ±1 调整）
-5. 点击 `Apply`
-6. 使用缩放、Reset View、Back View、Zoom Out 2x 浏览
-7. 设置导出目录，点击 `Export Current View`
-
-关键交互规则：
-- 指定点输入必须为整数
-- 指定点限制在 `[Point Start, Point End]`
-- 时域图与 time-space 图共用时间范围，缩放联动
-
-## 6. 滤波与导出规则
-
-滤波类型：
-- `none`
-- `lowpass`（需要 High Cut）
-- `highpass`（需要 Low Cut）
-- `bandpass`（需要 Low Cut + High Cut）
-
-频率约束：
-- 需满足 Nyquist 条件（`0 < cutoff < fs/2`）
-
-导出规则：
-- 仅导出当前可视窗口
-- 按视图横轴计算帧切片，按纵轴计算点切片
-- 命名：`eDAS-<sample-rate>-<point-count>-<start-time>.bin`
-- 结果写回 frame-major `int32`
-
-## 7. 性能与稳定性策略
-
-- 使用 `numpy.memmap` 按需映射大文件
-- 滤波/导出通过 `QThreadPool + QRunnable` 后台执行
-- 处理结果使用 LRU 缓存复用
-- 绘图矩阵使用 `float32` 与连续内存减少开销
-
-## 8. 常见问题
-
-- 无法解析元数据：文件名缺少 `Hz`/`pt`
-- 点范围非法：`Point Start > Point End` 或超界
-- 指定点非法：非整数或超出范围
-- 导出为空：当前可视区域无有效帧或点
-
-## 9. 相关文档
-
-- 开发文档：`docs/dev_log.md`
-- 大文件读取/处理/绘图策略：`docs/eDAS快速读取-处理-绘图策略总结.md`
-- 用户手册源：`docs/eDAS_user_manual_source.txt`
-- 用户手册（可用 Word 打开）：`docs/eDAS_user_manual.doc`
+按日期归档的早期手册记录当时版本；当前操作以根目录 README 和现行格式说明为准。源码更新后需要重启进程，旧 exe 需要重新打包。

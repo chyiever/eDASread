@@ -69,11 +69,10 @@ def main() -> int:
 
     # --- Seed settings, simulating a previous working session -------------
     seed = {
-        "tab1/point_start": "3",
-        "tab1/point_end": "120",
-        "tab1/vmin": "-0.9",
-        "tab1/vmax": "0.9",
-        "tab1/filter_type": "lowpass",
+        "schema/channel_index_base": 0,
+        "tab1/point_range": "3~120",
+        "tab1/color_range": "-0.9~0.9",
+        "tab1/filter": "~300",
         "tab1/save_filtered": True,
         "tab2/channels": "7,8",
         "tab2/psd_overlap": "60",
@@ -114,12 +113,12 @@ def main() -> int:
 
     window._apply_auto_point_limit(metadata=make_metadata(40))
     check("small file clamps point_start only if needed", panel.point_start_edit.text(), "3")
-    check("small file clamps point_end to 40", panel.point_end_edit.text(), "40")
+    check("small file clamps point_end to 39", panel.point_end_edit.text(), "39")
     check("small file still keeps tab2/channels", tab2.channels_edit.text(), "7,8")
     check("small file still keeps tab3/channel_range", tab3.channel_range_edit.text(), "4-30")
 
     # --- closeEvent flushes the latest values -----------------------------
-    panel.vmin_edit.setText("-1.25")
+    panel.color_range_edit.setText("-1.25~0.9")
     panel.colormap_combo.setCurrentText("hsv")
     tab3.spacing_edit.setText("7.5")
     window.show()
@@ -128,7 +127,7 @@ def main() -> int:
     app.processEvents()
 
     reader = make_store()
-    check("closeEvent saved tab1/vmin", str(reader.value("tab1/vmin")), "-1.25")
+    check("closeEvent saved tab1/color_range", str(reader.value("tab1/color_range")), "-1.25~0.9")
     check("closeEvent saved tab1/colormap", str(reader.value("tab1/colormap")), "hsv")
     check("closeEvent saved tab3/spacing", str(reader.value("tab3/spacing")), "7.5")
     check_true(

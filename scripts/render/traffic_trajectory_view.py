@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 )
 
 from scripts.render.plot_style import style_axis
+from scripts.ui.control_scroll import ControlScrollArea
 from scripts.render.space_time_view import COLOR_MAPS
 from scripts.render.time_axis import TimeAxisItem
 from scripts.processing.view_data import MAX_IMAGE_DISPLAY_COLUMNS, downsample_image_for_display
@@ -68,7 +69,8 @@ class TrafficTrajectoryView(QWidget):
         self.image_data: np.ndarray | None = None
         self.display_mode = "energy"
         self.energy_rate_hz = 1.0
-        self.point_start = 1
+        self.point_start = 0
+        self.channel_step = 1
         self.source_files: list[str] = []
         self.trajectories: list[list[tuple[float, float]]] = []
         self.trajectory_visible: list[bool] = []
@@ -78,11 +80,13 @@ class TrafficTrajectoryView(QWidget):
 
     def _build_ui(self) -> None:
         controls = QGroupBox("交通 DAS 能量图与轨迹标记参数")
-        row = QHBoxLayout(controls)
+        row = QGridLayout(controls)
         row.setContentsMargins(8, 6, 8, 6)
         row.setSpacing(8)
-        self.channel_start_edit = QLineEdit("200")
-        self.channel_end_edit = QLineEdit("820")
+        self.channel_start_edit = QLineEdit("199")
+        self.channel_start_edit.setToolTip("通道编号从 0 开始，范围包含起点和终点。")
+        self.channel_end_edit = QLineEdit("819")
+        self.channel_end_edit.setToolTip("通道编号从 0 开始，范围包含起点和终点。")
         self.display_mode_combo = QComboBox()
         self.display_mode_combo.addItem("能量图", "energy")
         self.display_mode_combo.addItem("相位图", "phase")
@@ -129,21 +133,22 @@ class TrafficTrajectoryView(QWidget):
         self.apply_color_button.setFixedWidth(92)
         self.generate_button.setFixedWidth(92)
 
-        row.addWidget(_labeled_pair("图像类型", self.display_mode_combo))
-        row.addWidget(_labeled_pair("通道起点", self.channel_start_edit))
-        row.addWidget(_labeled_pair("通道终点", self.channel_end_edit))
-        row.addWidget(_labeled_pair("低频(Hz)", self.low_cut_edit))
-        row.addWidget(_labeled_pair("高频(Hz)", self.high_cut_edit))
-        row.addWidget(_labeled_pair("降采样", self.decimation_edit))
-        row.addWidget(_labeled_pair("通道均衡", self.balance_combo))
-        row.addWidget(_labeled_pair("Colormap", self.colormap_combo))
-        row.addWidget(_labeled_pair("VMin", self.vmin_edit))
-        row.addWidget(_labeled_pair("VMax", self.vmax_edit))
-        row.addWidget(self.auto_color_checkbox)
-        row.addWidget(self.common_mode_checkbox)
-        row.addWidget(self.apply_color_button)
-        row.addWidget(self.generate_button)
-        row.addStretch(1)
+        row.addWidget(_labeled_pair("图像类型", self.display_mode_combo), 0, 0)
+        row.addWidget(_labeled_pair("通道起点", self.channel_start_edit), 0, 1)
+        row.addWidget(_labeled_pair("通道终点", self.channel_end_edit), 0, 2)
+        row.addWidget(_labeled_pair("低频(Hz)", self.low_cut_edit), 0, 3)
+        row.addWidget(_labeled_pair("高频(Hz)", self.high_cut_edit), 0, 4)
+        row.addWidget(_labeled_pair("降采样", self.decimation_edit), 0, 5)
+        row.addWidget(_labeled_pair("通道均衡", self.balance_combo), 0, 6)
+        row.addWidget(_labeled_pair("Colormap", self.colormap_combo), 1, 0)
+        row.addWidget(_labeled_pair("VMin", self.vmin_edit), 1, 1)
+        row.addWidget(_labeled_pair("VMax", self.vmax_edit), 1, 2)
+        row.addWidget(self.auto_color_checkbox, 1, 3)
+        row.addWidget(self.common_mode_checkbox, 1, 4)
+        row.addWidget(self.apply_color_button, 1, 5)
+        row.addWidget(self.generate_button, 1, 6)
+        row.setColumnStretch(7, 1)
+
 
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.channel_axis = pg.AxisItem(orientation="left")
@@ -212,7 +217,7 @@ class TrafficTrajectoryView(QWidget):
         splitter.addWidget(side)
         splitter.setSizes([1100, 250])
         layout = QVBoxLayout(self)
-        layout.addWidget(controls)
+        layout.addWidget(ControlScrollArea(controls))
         layout.addWidget(splitter, 1)
 
         self.generate_button.clicked.connect(self.generate_requested)
@@ -241,12 +246,13 @@ class TrafficTrajectoryView(QWidget):
             widget.setEnabled(is_energy)
 
     def set_energy(self, energy: np.ndarray, energy_rate_hz: float, point_start: int,
-                   source_files: list[str], start_time=None) -> None:
+                   source_files: list[str], start_time=None, channel_step=1) -> None:
         self.energy = np.asarray(energy, dtype=np.float32)
         self.image_data = self.energy
         self.display_mode = "energy"
         self.energy_rate_hz = float(energy_rate_hz)
         self.point_start = int(point_start)
+        self.channel_step = int(channel_step)
         self.source_files = list(source_files)
         self.time_axis.set_reference_time(start_time)
         self.clear_trajectories()
@@ -257,25 +263,26 @@ class TrafficTrajectoryView(QWidget):
         self.histogram_widget.item.axis.setLabel(text="Energy", units="")
         self.plot.setTitle(
             f"车辆轨迹能量图 | 时间 {duration_s:.3f} s | "
-            f"通道 {point_start}-{point_start + self.energy.shape[1] - 1} | "
+            f"通道 {point_start}-{point_start + (self.energy.shape[1] - 1) * self.channel_step} | "
             f"{len(source_files)} 个文件"
         )
 
     def set_phase(self, phase: np.ndarray, sample_rate_hz: float, point_start: int,
-                  source_files: list[str], start_time=None) -> None:
+                  source_files: list[str], start_time=None, channel_step=1) -> None:
         """Display the Tab1-stitched phase matrix with time on the x axis."""
         self.energy = None
         self.image_data = np.asarray(phase, dtype=np.float32)
         self.display_mode = "phase"
         self.energy_rate_hz = float(sample_rate_hz)
         self.point_start = int(point_start)
+        self.channel_step = int(channel_step)
         self.source_files = list(source_files)
         self.time_axis.set_reference_time(start_time)
         self.clear_trajectories()
         self._set_image_matrix(self.image_data, self.energy_rate_hz)
         self.apply_color_controls()
         duration_s = self.image_data.shape[0] / self.energy_rate_hz
-        point_end = point_start + self.image_data.shape[1] - 1
+        point_end = point_start + (self.image_data.shape[1] - 1) * self.channel_step
         self._set_plot_ranges(duration_s, point_start, self.image_data.shape[1])
         self.histogram_widget.item.axis.setLabel(text="Phase", units="rad")
         self.plot.setTitle(
@@ -292,16 +299,16 @@ class TrafficTrajectoryView(QWidget):
         self.image_item.setImage(display, autoLevels=False)
         transform = QTransform()
         transform.translate(0.0, float(self.point_start))
-        transform.scale(samples_per_column / sample_rate_hz, 1.0)
+        transform.scale(samples_per_column / sample_rate_hz, self.channel_step)
         self.image_item.setTransform(transform)
 
     def _set_plot_ranges(self, duration_s: float, point_start: int, point_count: int) -> None:
         self.plot.setLimits(
             xMin=0.0, xMax=duration_s,
-            yMin=float(point_start), yMax=float(point_start + point_count),
+            yMin=float(point_start), yMax=float(point_start + point_count * self.channel_step),
         )
         self.plot.setXRange(0.0, duration_s, padding=0)
-        self.plot.setYRange(float(point_start), float(point_start + point_count), padding=0)
+        self.plot.setYRange(float(point_start), float(point_start + point_count * self.channel_step), padding=0)
 
     def _apply_colormap(self) -> None:
         name = self.colormap_combo.currentText().lower()
@@ -367,8 +374,8 @@ class TrafficTrajectoryView(QWidget):
         if self.image_data is None:
             return
         duration = self.image_data.shape[0] / self.energy_rate_hz
-        last_channel = self.point_start + self.image_data.shape[1] - 1
-        if not (0 <= t <= duration and self.point_start <= channel <= last_channel + 1):
+        last_channel = self.point_start + (self.image_data.shape[1] - 1) * self.channel_step
+        if not (0 <= t <= duration and self.point_start <= channel <= last_channel + self.channel_step):
             return
         self.current_points.append((float(t), float(channel)))
         self._redraw()
@@ -433,13 +440,14 @@ class TrafficTrajectoryView(QWidget):
 
     def annotation_document(self) -> dict:
         return {
-            "format": "edasread-traffic-trajectories-v1",
-            "coordinate_system": {"x": "seconds_from_first_frame", "y": "1_based_channel"},
+            "format": "edasread-traffic-trajectories-v2",
+            "coordinate_system": {"x": "seconds_from_first_frame", "y": "0_based_channel"},
             "source_files": self.source_files,
             "display_mode": self.display_mode,
             "display_sample_rate_hz": self.energy_rate_hz,
             "energy_rate_hz": self.energy_rate_hz if self.display_mode == "energy" else None,
-            "channel_range": [self.point_start, self.point_start + (self.image_data.shape[1] - 1 if self.image_data is not None else 0)],
+            "channel_step": self.channel_step,
+            "channel_range": [self.point_start, self.point_start + ((self.image_data.shape[1] - 1) * self.channel_step if self.image_data is not None else 0)],
             "trajectories": [
                 {"id": i + 1, "visible": self.trajectory_visible[i],
                  "points": [{"time_s": t, "channel": ch} for t, ch in points]}
@@ -468,13 +476,27 @@ class TrafficTrajectoryView(QWidget):
             target.write_text(json.dumps(self.annotation_document(), ensure_ascii=False, indent=2), encoding="utf-8")
         QMessageBox.information(self, "导出完成", f"轨迹标注已保存到：\n{target}")
 
+    @staticmethod
+    def decode_annotation_trajectories(doc: dict) -> list:
+        """Read zero-based annotations and migrate legacy one-based JSON."""
+        coordinate = doc.get("coordinate_system", {}).get("y")
+        if coordinate == "0_based_channel":
+            offset = 0.0
+        elif coordinate == "1_based_channel" or (
+            coordinate is None and doc.get("format") == "edasread-traffic-trajectories-v1"
+        ):
+            offset = 1.0
+        else:
+            raise ValueError("无法识别轨迹通道坐标定义。")
+        return [[(float(p["time_s"]), float(p["channel"]) - offset) for p in tr["points"]]
+                for tr in doc.get("trajectories", [])]
+
     def choose_and_load(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "载入轨迹标注", "", "JSON (*.json)")
         if not path: return
         try:
             doc = json.loads(Path(path).read_text(encoding="utf-8"))
-            loaded = [[(float(p["time_s"]), float(p["channel"])) for p in tr["points"]]
-                      for tr in doc.get("trajectories", [])]
+            loaded = self.decode_annotation_trajectories(doc)
             if any(len(points) < 2 for points in loaded): raise ValueError("存在少于两个顶点的轨迹。")
             self.trajectories = loaded
             self.trajectory_visible = [bool(tr.get("visible", True)) for tr in doc.get("trajectories", [])]

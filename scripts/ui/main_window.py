@@ -5,22 +5,25 @@ from __future__ import annotations
 import re
 import tempfile
 import wave
+from threading import Event
 from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
-from PyQt5.QtCore import QEvent, Qt, QThreadPool, QTimer
+from PyQt5.QtCore import QEvent, QSize, Qt, QThreadPool, QTimer
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QScrollBar,
     QSizePolicy,
     QSplitter,
@@ -41,17 +44,11 @@ from scripts.core.resources import asset_path
 from scripts.core.settings import ParameterStore
 from scripts.io.bin_reader import (
     batch_compress_bin_folder,
-    build_export_filename,
-    convert_radians_to_raw,
-    convert_raw_to_radians,
     infer_points_from_filename,
     inspect_bin_file,
-    list_raw_bin_files,
-    list_bin_files,
-    read_bin_memmap,
     read_phase_radians,
 )
-from scripts.io.text_export import write_phase_txt
+from scripts.io.view_export import ViewExportRequest, export_view
 from scripts.processing.denoise_pipeline import apply_denoise_step, compute_fk_spectrum_db
 from scripts.processing.filters import apply_filter
 from scripts.processing.time_frequency import compute_time_frequency_map
@@ -61,6 +58,10 @@ from scripts.processing.traffic_trajectory import build_vehicle_energy_image
 from scripts.render.traffic_trajectory_view import TrafficTrajectoryView
 from scripts.ui.control_panel import ControlPanel
 from scripts.ui.file_browser import FileBrowserPanel
+from scripts.ui.theme import apply_theme, tab_icon
+from scripts.ui.control_scroll import ControlScrollArea
+from scripts.ui.settings_dialog import SettingsDialog
+from scripts.io.directory_scan import scan_directory
 from scripts.workers.tasks import FunctionWorker
 
 
@@ -70,60 +71,13 @@ class MainWindow(QMainWindow):
     CACHE_MAX_BYTES = 1_000_000_000
     HORIZONTAL_KEY_STEP_RATIO = 0.4
     AUTO_POINT_CAP = 100
-    WINDOW_TITLE = "分布式光纤传感数据回放软件(eDASread)"
+    WINDOW_TITLE = "eDAS数据处理软件（eDASpy ）"
     PREPROCESS_LABELS = {
         "spike": "去尖峰噪声",
         "common": "去共模噪声",
         "random": "去随机噪声",
         "fk": "FK滤波",
     }
-    BUTTON_STYLE = """
-        QPushButton {
-            background-color: #2f6db2;
-            color: white;
-            border: 1px solid #224f82;
-            border-radius: 4px;
-            padding: 5px 12px;
-            font-family: "Microsoft YaHei", "SimSun";
-            font-size: 15px;
-            font-weight: 600;
-        }
-        QPushButton:hover {
-            background-color: #3a7dcb;
-        }
-        QPushButton:pressed {
-            background-color: #234f82;
-        }
-        QPushButton:disabled {
-            background-color: #9aa8b8;
-            border-color: #8794a4;
-            color: #eef3f8;
-        }
-        QTabWidget::pane {
-            border: 1px solid #b7c1ce;
-            top: -1px;
-        }
-        QTabBar {
-            font-family: "Microsoft YaHei", "SimSun";
-            font-size: 18px;
-            font-weight: 600;
-        }
-        QTabBar::tab {
-            background: #eef1f5;
-            border: 1px solid #c4ccd6;
-            padding: 8px 40px;
-            color: #1f2937;
-        }
-        QTabBar::tab:selected {
-            background: #2f6db2;
-            color: white;
-            border-color: #224f82;
-        }
-        QTabBar::tab:hover:!selected {
-            background: #dbe7f5;
-        }
-    """
-
     def __init__(self, default_directory: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle(self.WINDOW_TITLE)
@@ -147,6 +101,12 @@ class MainWindow(QMainWindow):
         self._bz_progress_dialog: Optional[QProgressDialog] = None
         self._audio_temp_paths: list[Path] = []
         self._file_load_generation = 0
+        self._directory_generation = 0
+        self._directory_cancel = Event()
+        self._directory_worker = None
+        self._pending_directory_request = None
+        self._listed_directory = None
+        self._closing = False
 
         self.file_browser = FileBrowserPanel()
         self.control_panel = ControlPanel()
@@ -194,7 +154,8 @@ class MainWindow(QMainWindow):
         self.fk_spectrum_view.refresh_merged_ranges()
         self.time_frequency_view.refresh_merged_fields()
         self._on_waveform_point_changed()
-        self.setStyleSheet(self.BUTTON_STYLE)
+        self.interface_font_size = self._parameter_store.interface_font_size()
+        apply_theme(self, self.interface_font_size)
 
         QApplication.instance().installEventFilter(self)
 
@@ -215,20 +176,19 @@ class MainWindow(QMainWindow):
         self.load_directory(show_errors=False)
 
     def _build_layout(self) -> None:
-        title_font = QFont("SimHei", 30)
+        self.title_label.setObjectName("appTitle")
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setFont(title_font)
-        self.title_label.setStyleSheet("color: black;")
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.title_label.setFixedHeight(64)
-
         title_row = QWidget()
-        title_row_layout = QHBoxLayout(title_row)
-        title_row_layout.setContentsMargins(0, 0, 0, 0)
-        title_row_layout.setSpacing(6)
-        title_row_layout.addStretch(1)
-        title_row_layout.addWidget(self.title_label, 0, Qt.AlignCenter)
-        title_row_layout.addStretch(1)
+        title_row.setObjectName("appHeader")
+        title_row.setFixedHeight(56)
+        title_row_layout = QGridLayout(title_row)
+        title_row_layout.setContentsMargins(16, 0, 16, 0)
+        title_row_layout.addWidget(self.title_label, 0, 0)
+        self.settings_button = QPushButton("设置")
+        self.settings_button.clicked.connect(self.show_settings)
+        title_row_layout.addWidget(self.settings_button, 0, 0, Qt.AlignRight | Qt.AlignVCenter)
+        self.title_label.setToolTip("光纤传感 / 波形分析 / 事件标注")
 
         tab1_panel = QWidget()
         tab1_layout = QHBoxLayout(tab1_panel)
@@ -237,18 +197,22 @@ class MainWindow(QMainWindow):
         plot_column = QVBoxLayout()
         plot_column.setContentsMargins(0, 0, 0, 0)
         plot_column.setSpacing(6)
-        plot_column.addWidget(self.control_panel)
+        plot_column.addWidget(ControlScrollArea(self.control_panel))
         plot_column.addWidget(self.space_time_view, 1)
         plot_column.addWidget(self.horizontal_scroll)
 
         tab1_layout.addLayout(plot_column, 1)
         tab1_layout.addWidget(self.vertical_scroll)
 
-        self.plot_tabs.addTab(tab1_panel, "Tab1 数据预处理")
-        self.plot_tabs.addTab(self.channel_analysis_view, "Tab2 通道时域/PSD")
-        self.plot_tabs.addTab(self.fk_spectrum_view, "Tab3 f-k谱")
-        self.plot_tabs.addTab(self.time_frequency_view, "Tab4 时域/时频")
-        self.plot_tabs.addTab(self.traffic_trajectory_view, "Tab5 车辆轨迹标记")
+        for page, title, icon in (
+            (tab1_panel, "Tab1 数据处理", "processing"),
+            (self.channel_analysis_view, "Tab2 时域 / PSD", "waveform"),
+            (self.fk_spectrum_view, "Tab3 f-k 谱", "fk"),
+            (self.time_frequency_view, "Tab4 时频分析", "spectrogram"),
+            (self.traffic_trajectory_view, "Tab5 轨迹标注", "traffic"),
+        ):
+            self.plot_tabs.addTab(page, tab_icon(icon), title)
+        self.plot_tabs.setIconSize(QSize(20, 20))
         self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
 
         splitter = QSplitter()
@@ -256,7 +220,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.plot_tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([350, 1100])
+        splitter.setSizes([260, 1180])
         splitter.setHandleWidth(6)
         splitter.setChildrenCollapsible(False)
         # Bound the panes so the splitter handle stays freely draggable instead of
@@ -264,7 +228,9 @@ class MainWindow(QMainWindow):
         self.file_browser.setMinimumWidth(240)
         self.plot_tabs.setMinimumWidth(820)
 
+        self.file_browser.setObjectName("filePanel")
         container = QWidget()
+        container.setObjectName("workspace")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -276,6 +242,7 @@ class MainWindow(QMainWindow):
         self.file_browser.path_edit.returnPressed.connect(lambda: self.load_directory(show_errors=True))
         self.file_browser.path_edit.textChanged.connect(self._schedule_directory_load)
         self.file_browser.compress_bz_button.clicked.connect(self.compress_current_directory_to_bz)
+        self.file_browser.refresh_button.clicked.connect(lambda: self.load_directory(show_errors=True))
         self.file_browser.sort_combo.currentIndexChanged.connect(self._on_file_sort_changed)
         self.file_browser.previous_button.clicked.connect(self.show_previous_page)
         self.file_browser.next_button.clicked.connect(self.show_next_page)
@@ -305,6 +272,7 @@ class MainWindow(QMainWindow):
         self.control_panel.spacing_combo.currentTextChanged.connect(self._on_wiggle_control_changed)
         self.control_panel.spacing_edit.textEdited.connect(self._on_wiggle_control_changed)
         self.control_panel.export_button.clicked.connect(self.export_current_view)
+        self.control_panel.clear_arrivals_button.clicked.connect(self.space_time_view.clear_arrivals)
         self.control_panel.point_start_edit.textChanged.connect(self._sync_waveform_point_bounds)
         self.control_panel.point_end_edit.textChanged.connect(self._sync_waveform_point_bounds)
         self.control_panel.point_range_edit.textEdited.connect(self._on_point_range_text_edited)
@@ -330,12 +298,25 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched, event):
         """Allow arrow keys to drive horizontal/vertical panning."""
+        if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape
+            and self.plot_tabs.currentIndex() == 0 and self.space_time_view._plot_mode == "wiggle"
+            and QApplication.activePopupWidget() is None and QApplication.activeModalWidget() is None
+            and not isinstance(QApplication.focusWidget(), (QLineEdit, QComboBox))):
+            # Native key auto-repeat removes one more mark per repeated Esc event.
+            self.space_time_view.undo_latest_arrival()
+            return True
         if event.type() == QEvent.KeyPress and event.key() in (
             Qt.Key_Left,
             Qt.Key_Right,
             Qt.Key_Up,
             Qt.Key_Down,
         ):
+            if (event.modifiers() & Qt.ControlModifier and
+                event.key() in (Qt.Key_Left, Qt.Key_Right) and self.plot_tabs.currentIndex() == 0
+                and self.space_time_view._plot_mode == "wiggle"
+                and self.space_time_view._hover_channel is not None):
+                self.space_time_view.adjust_hovered_arrival(-1 if event.key() == Qt.Key_Left else 1)
+                return True
             focus_widget = QApplication.focusWidget()
             if isinstance(focus_widget, (QLineEdit, QComboBox)):
                 return super().eventFilter(watched, event)
@@ -363,9 +344,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Persist the latest parameters so they reload on next launch."""
+        self._closing = True
+        self._directory_cancel.set()
+        self._pending_directory_request = None
         self._directory_load_timer.stop()
         self._file_selection_timer.stop()
         self._parameter_save_timer.stop()
+        QApplication.instance().removeEventFilter(self)
         try:
             self._save_parameters()
         finally:
@@ -373,34 +358,103 @@ class MainWindow(QMainWindow):
 
     def _schedule_directory_load(self) -> None:
         """Debounce directory loading while the user edits the path."""
+        self._directory_cancel.set()
         self._directory_load_timer.start()
 
     def _load_directory_from_timer(self) -> None:
         self.load_directory(show_errors=False)
 
     def load_directory(self, show_errors: bool = True) -> None:
-        """Load files from the directory typed into the file browser."""
+        """Schedule a cancelable scan; filesystem work never runs on the UI thread."""
         self._directory_load_timer.stop()
         directory = self.file_browser.path_edit.text().strip()
+        self._directory_generation += 1
+        self._directory_cancel.set()
+        self._pending_directory_request = None
         if not directory:
             self.file_paths = []
             self._clear_file_listing()
+            self.file_browser.file_list_status.setText("")
             return
-
-        try:
-            self.file_paths = list_bin_files(directory)
-            self._sort_file_paths()
-        except Exception as exc:
+        selection = self._selected_file_paths() if directory == self._listed_directory else []
+        page = self.current_page if directory == self._listed_directory else 0
+        if directory != self._listed_directory:
+            self._file_selection_timer.stop()
+            self._file_load_generation += 1
             self.file_paths = []
             self._clear_file_listing()
-            if show_errors:
-                self._show_error(str(exc))
-            return
+        self.file_browser.file_list_status.setText("正在扫描文件…")
+        self._pending_directory_request = (self._directory_generation, directory, self.file_sort_mode, show_errors, selection, page)
+        if self._directory_worker is None:
+            self._start_directory_scan()
 
-        self.current_page = 0
-        self._refresh_file_page()
-        if self.file_browser.file_list.count() > 0:
-            self.file_browser.file_list.setCurrentRow(0)
+    def _start_directory_scan(self):
+        request = self._pending_directory_request
+        if request is None or self._closing:
+            return
+        self._pending_directory_request = None
+        self._directory_cancel = Event()
+        worker = FunctionWorker(scan_directory, request[1], request[2], self._directory_cancel)
+        self._directory_worker = worker
+        self._active_workers.add(worker)
+        worker.signals.result.connect(lambda paths: self._on_directory_scanned(request, paths))
+        worker.signals.error.connect(lambda message: self._on_directory_error(request, message))
+        worker.signals.finished.connect(lambda: self._finish_directory_scan(worker))
+        self.thread_pool.start(worker)
+
+    def _directory_request_current(self, request):
+        return (not self._closing and request[0] == self._directory_generation
+                and request[1] == self.file_browser.path_edit.text().strip()
+                and request[2] == self.file_sort_mode)
+
+    def _on_directory_scanned(self, request, paths):
+        if paths is None or not self._directory_request_current(request):
+            return
+        self.file_paths = paths
+        self._listed_directory = request[1]
+        self.current_page = request[5]
+        selected = set(request[4])
+        first = next((i for i,p in enumerate(paths) if p in selected), None)
+        if first is not None:
+            self.current_page = first // self.file_browser.PAGE_SIZE
+        listing = self.file_browser.file_list
+        listing.blockSignals(True)
+        try:
+            self._refresh_file_page()
+            start = self.current_page * self.file_browser.PAGE_SIZE
+            for row, path in enumerate(paths[start:start+self.file_browser.PAGE_SIZE]):
+                if path in selected:
+                    listing.item(row).setSelected(True)
+                    listing.setCurrentItem(listing.item(row), listing.selectionModel().NoUpdate)
+        finally:
+            listing.blockSignals(False)
+        self.file_browser.file_list_status.setText(f"共 {len(paths)} 个文件")
+        if not selected and listing.count():
+            listing.setCurrentRow(0)
+
+    def _on_directory_error(self, request, message):
+        if not self._directory_request_current(request):
+            return
+        self.file_paths = []
+        self._clear_file_listing()
+        self.file_browser.file_list_status.setText("扫描失败，请检查目录")
+        if request[3]:
+            self._show_error(message)
+
+    def _finish_directory_scan(self, worker):
+        self._active_workers.discard(worker)
+        if self._directory_worker is worker:
+            self._directory_worker = None
+        self._start_directory_scan()
+
+    def show_settings(self):
+        dialog = SettingsDialog(self, self.interface_font_size, self.set_interface_font_size)
+        dialog.exec_()
+
+    def set_interface_font_size(self, size):
+        self.interface_font_size = max(12, min(28, int(size)))
+        apply_theme(self, self.interface_font_size)
+        self._parameter_store.save_interface_font_size(self.interface_font_size)
 
     def compress_current_directory_to_bz(self) -> None:
         """Batch-compress all bin files in the current folder to bz."""
@@ -410,11 +464,10 @@ class MainWindow(QMainWindow):
             return
 
         source_folder = Path(directory_text)
-        try:
-            bin_files = list_raw_bin_files(source_folder)
-        except Exception as exc:
-            self._show_error(str(exc))
+        if directory_text != self._listed_directory or self._directory_worker is not None:
+            self.statusBar().showMessage("请等待当前目录刷新完成后再批量压缩。", 5000)
             return
+        bin_files = [path for path in self.file_paths if path.suffix.lower() == ".bin"]
         if not bin_files:
             self._show_error(f"No .bin files found in {source_folder}.")
             return
@@ -556,42 +609,10 @@ class MainWindow(QMainWindow):
         self.file_browser.next_button.setEnabled(False)
         self.file_browser.page_jump_edit.setPlaceholderText("page / home / end")
 
-    def _sort_file_paths(self) -> None:
-        mode = self.file_sort_mode
-        if mode == "mtime_desc":
-            self.file_paths.sort(key=lambda path: (-self._file_mtime_ns(path), path.name.casefold()))
-        elif mode == "mtime_asc":
-            self.file_paths.sort(key=lambda path: (self._file_mtime_ns(path), path.name.casefold()))
-        else:
-            self.file_paths.sort(key=lambda path: path.name.casefold())
-
-    def _file_mtime_ns(self, path: Path) -> int:
-        try:
-            return int(path.stat().st_mtime_ns)
-        except OSError:
-            return 0
-
     def _on_file_sort_changed(self) -> None:
         mode = self.file_browser.sort_combo.currentData() or "name_asc"
         self.file_sort_mode = str(mode)
-        selected_path = self._selected_file_path() or self.current_file_path
-        self._sort_file_paths()
-
-        if selected_path in self.file_paths:
-            selected_index = self.file_paths.index(selected_path)
-            self.current_page = selected_index // self.file_browser.PAGE_SIZE
-            selected_row = selected_index % self.file_browser.PAGE_SIZE
-        else:
-            self.current_page = 0
-            selected_row = -1
-
-        self.file_browser.file_list.blockSignals(True)
-        try:
-            self._refresh_file_page()
-            if 0 <= selected_row < self.file_browser.file_list.count():
-                self.file_browser.file_list.setCurrentRow(selected_row)
-        finally:
-            self.file_browser.file_list.blockSignals(False)
+        self.load_directory(show_errors=False)
 
     def _refresh_file_page(self) -> None:
         if not self.file_paths:
@@ -605,8 +626,7 @@ class MainWindow(QMainWindow):
         end = start + page_size
 
         self.file_browser.file_list.clear()
-        for path in self.file_paths[start:end]:
-            self.file_browser.file_list.addItem(path.name)
+        self.file_browser.file_list.addItems([path.name for path in self.file_paths[start:end]])
 
         self.file_browser.page_label.setText(f"Page {self.current_page + 1} / {total_pages}")
         self.file_browser.previous_button.setEnabled(self.current_page > 0)
@@ -712,6 +732,8 @@ class MainWindow(QMainWindow):
         for metadata in source_metadata[1:]:
             if metadata.points != first.points:
                 raise ValueError("多选拼接要求所有文件的位置点数一致。")
+            if (metadata.channel_start, metadata.channel_step) != (first.channel_start, first.channel_step):
+                raise ValueError("多选拼接要求原始通道起点和通道间隔一致。")
             if not np.isclose(metadata.sample_rate_hz, first.sample_rate_hz):
                 raise ValueError("多选拼接要求所有文件的采样率一致。")
 
@@ -721,6 +743,12 @@ class MainWindow(QMainWindow):
         frame_count = sum(metadata.frame_count for metadata in source_metadata)
         file_size_bytes = sum(metadata.file_size_bytes for metadata in source_metadata)
         synthetic_name = f"{source_metadata[0].file_path.stem}+{len(source_metadata)}files{source_metadata[0].file_path.suffix}"
+        arrivals = {}
+        offset = 0.0
+        for item in source_metadata:
+            for channel, time_s in item.arrivals:
+                arrivals.setdefault(channel, time_s + offset)
+            offset += item.frame_count / first.sample_rate_hz
         group_metadata = FileMetadata(
             file_path=source_metadata[0].file_path.with_name(synthetic_name),
             sample_rate_hz=first.sample_rate_hz,
@@ -729,6 +757,9 @@ class MainWindow(QMainWindow):
             duration_s=frame_count / first.sample_rate_hz,
             file_size_bytes=file_size_bytes,
             start_time=first.start_time,
+            channel_start=first.channel_start, channel_step=first.channel_step,
+            arrivals=tuple(arrivals.items()),
+            acquisition_start_time=first.acquisition_start_time or first.start_time,
         )
         return group_metadata, source_metadata
 
@@ -758,6 +789,7 @@ class MainWindow(QMainWindow):
 
         return {
             "metadata": metadata,
+            "source_metadata": tuple(source_metadata),
             "data": processed,
             "file_path": metadata.file_path,
             "file_paths": [item.file_path for item in source_metadata],
@@ -769,6 +801,10 @@ class MainWindow(QMainWindow):
         if int(payload.get("load_generation", -1)) != self._file_load_generation:
             return
         self.current_metadata = payload["metadata"]
+        self.current_source_metadata = tuple(payload.get("source_metadata", (self.current_metadata,)))
+        self.space_time_view.set_arrival_context(
+            tuple(str(item.file_path) for item in self.current_source_metadata), self.current_metadata
+        )
         self.current_data = payload["data"]
         self.current_file_path = payload["file_path"]
         self.current_file_paths = list(payload.get("file_paths", [self.current_file_path]))
@@ -928,6 +964,7 @@ class MainWindow(QMainWindow):
             fk_options,
             levels,
             self.current_file_path,
+            self.current_metadata,
         )
         self._active_workers.add(worker)
         worker.signals.result.connect(self._on_fk_spectrum_ready)
@@ -945,13 +982,15 @@ class MainWindow(QMainWindow):
         fk_options: dict,
         levels: tuple[float, float],
         file_path: Path | None,
+        metadata: FileMetadata | None = None,
     ) -> dict:
-        channel_slice = slice(channel_start - 1, channel_end)
+        metadata = metadata or self.current_metadata
+        channel_slice = metadata.channel_slice(channel_start, channel_end)
         gather = np.asarray(data[:, channel_slice], dtype=np.float32)
         spectrum = compute_fk_spectrum_db(
             gather,
             sample_rate_hz=sample_rate_hz,
-            channel_spacing_m=spacing_m,
+            channel_spacing_m=spacing_m * metadata.channel_step,
             taper_fraction=fk_options["taper_fraction"],
             remove_background=fk_options["remove_background"],
             nfft_channels=fk_options["nfft_channels"],
@@ -1025,7 +1064,7 @@ class MainWindow(QMainWindow):
         tf_options: dict,
         file_path: Path | None,
     ) -> dict:
-        trace = np.asarray(data[:, channel - 1], dtype=np.float32).reshape(-1, 1)
+        trace = np.asarray(data[:, metadata.channel_index(channel)], dtype=np.float32).reshape(-1, 1)
         if filter_config.is_enabled():
             trace = apply_filter(trace, metadata.sample_rate_hz, filter_config)
         trace_1d = np.asarray(trace[:, 0], dtype=np.float32)
@@ -1080,8 +1119,8 @@ class MainWindow(QMainWindow):
             channel_end = int(tab.channel_end_edit.text().strip())
             if channel_start > channel_end:
                 channel_start, channel_end = channel_end, channel_start
-            if channel_start < 1 or channel_end > self.current_metadata.points:
-                raise ValueError(f"通道范围必须位于 1-{self.current_metadata.points}。")
+            if channel_start < self.current_metadata.channel_start or channel_end > self.current_metadata.channel_end:
+                raise ValueError(f"通道范围必须位于 {self.current_metadata.channel_start}-{self.current_metadata.channel_end}。")
             if display_mode == "energy":
                 low_hz = float(tab.low_cut_edit.text().strip())
                 high_hz = float(tab.high_cut_edit.text().strip())
@@ -1091,7 +1130,7 @@ class MainWindow(QMainWindow):
             return
 
         phase_slice = np.ascontiguousarray(
-            self.current_data[:, channel_start - 1:channel_end], dtype=np.float32
+            self.current_data[:, self.current_metadata.channel_slice(channel_start, channel_end)], dtype=np.float32
         )
         # Use the exact same frames x points matrix already assembled for
         # Tab1.  Only slice columns here; never concatenate selected channels
@@ -1105,6 +1144,7 @@ class MainWindow(QMainWindow):
                 channel_start,
                 source_files,
                 start_time=self.current_metadata.start_time,
+                channel_step=self.current_metadata.channel_step,
             )
             self.statusBar().showMessage(
                 f"Tab5 相位图完成：{phase_slice.shape[0]} 帧 × {phase_slice.shape[1]} 通道，"
@@ -1169,6 +1209,7 @@ class MainWindow(QMainWindow):
             channel_start,
             source_files,
             start_time=self.current_metadata.start_time if self.current_metadata else None,
+            channel_step=self.current_metadata.channel_step if self.current_metadata else 1,
         )
         self.statusBar().showMessage(
             f"Tab5 能量图完成：{energy.shape[0]} × {energy.shape[1]} 像素，"
@@ -1187,7 +1228,7 @@ class MainWindow(QMainWindow):
         try:
             start_point, end_point = self._read_point_range()
             waveform_point = self._read_waveform_point(start_point, end_point)
-            waveform = np.asarray(self.current_data[:, waveform_point - 1], dtype=np.float32)
+            waveform = np.asarray(self.current_data[:, self.current_metadata.channel_index(waveform_point)], dtype=np.float32)
             audio_path, audio_rate = self._write_waveform_audio(waveform, self.current_metadata.sample_rate_hz)
         except Exception as exc:
             self._show_error(str(exc))
@@ -1291,6 +1332,9 @@ class MainWindow(QMainWindow):
             "tab1/export_folder": panel.export_path_edit,
             "tab1/save_filtered": panel.save_filtered_checkbox,
             "tab1/save_as_txt": panel.save_as_txt_checkbox,
+            "tab1/export_format": panel.export_format_combo,
+            "tab1/export_time_step": panel.export_time_step_edit,
+            "tab1/export_space_step": panel.export_space_step_edit,
             "tab2/channels": tab2.channels_edit,
             "tab2/psd_nperseg": tab2.psd_nperseg_edit,
             "tab2/psd_overlap": tab2.psd_overlap_edit,
@@ -1364,7 +1408,7 @@ class MainWindow(QMainWindow):
             raise ValueError("No file loaded.")
         parts = [part for part in re.split(r"[,，、;\s]+", text.strip()) if part]
         if not parts:
-            raise ValueError("请输入通道号，例如 5,10,15。")
+            raise ValueError("请输入从 0 开始的通道号，例如 0,4,9。")
 
         channels = []
         for part in parts:
@@ -1372,8 +1416,9 @@ class MainWindow(QMainWindow):
                 channel = int(part)
             except ValueError as exc:
                 raise ValueError(f"无效通道号：{part}") from exc
-            if channel < 1 or channel > self.current_metadata.points:
-                raise ValueError(f"通道 {channel} 超出有效范围 1-{self.current_metadata.points}。")
+            if channel < self.current_metadata.channel_start or channel > self.current_metadata.channel_end:
+                raise ValueError(f"通道 {channel} 超出有效范围 {self.current_metadata.channel_start}-{self.current_metadata.channel_end}。")
+            self.current_metadata.channel_index(channel)
             channels.append(channel)
         return channels
 
@@ -1384,14 +1429,15 @@ class MainWindow(QMainWindow):
         normalized = text.strip().replace("：", ":").replace("－", "-").replace("—", "-")
         match = re.fullmatch(r"(\d+)\s*[-:~]\s*(\d+)", normalized)
         if match is None:
-            raise ValueError("通道范围格式应为 5-100。")
+            raise ValueError("通道范围格式应为 0-99（包含两端）。")
 
         start = int(match.group(1))
         end = int(match.group(2))
         if start > end:
             start, end = end, start
-        if start < 1 or end > self.current_metadata.points:
-            raise ValueError(f"通道范围必须位于 1-{self.current_metadata.points}。")
+        if start < self.current_metadata.channel_start or end > self.current_metadata.channel_end:
+            raise ValueError(f"通道范围必须位于 {self.current_metadata.channel_start}-{self.current_metadata.channel_end}。")
+        self.current_metadata.channel_slice(start, end)
         return start, end
 
     def _read_tab2_psd_options(self) -> dict:
@@ -1537,7 +1583,7 @@ class MainWindow(QMainWindow):
         vmax_mps = self._read_positive_float(self.control_panel.fk_vmax_edit, "FK VMax")
         if np.isclose(vmin_mps, vmax_mps):
             raise ValueError("FK VMin 和 VMax 不能相等。")
-        return spacing_m, vmin_mps, vmax_mps
+        return spacing_m * (self.current_metadata.channel_step if self.current_metadata else 1), vmin_mps, vmax_mps
 
     def _read_channel_number(self, line_edit: QLineEdit, name: str) -> int:
         if self.current_metadata is None:
@@ -1549,8 +1595,9 @@ class MainWindow(QMainWindow):
             channel = int(text)
         except ValueError as exc:
             raise ValueError(f"{name}必须是整数。") from exc
-        if channel < 1 or channel > self.current_metadata.points:
-            raise ValueError(f"{name}必须位于 1-{self.current_metadata.points}。")
+        if channel < self.current_metadata.channel_start or channel > self.current_metadata.channel_end:
+            raise ValueError(f"{name}必须位于 {self.current_metadata.channel_start}-{self.current_metadata.channel_end}。")
+        self.current_metadata.channel_index(channel)
         return channel
 
     def _read_fk_db_levels(self) -> tuple[float, float]:
@@ -1676,7 +1723,7 @@ class MainWindow(QMainWindow):
         selected_file = self._selected_file_path() or self.current_file_path
         metadata = self.current_metadata if self.current_metadata and self.current_metadata.file_path == selected_file else None
 
-        self.control_panel.point_start_edit.setText("1")
+        self.control_panel.point_start_edit.setText(str(metadata.channel_start if metadata else 0))
         self.control_panel.point_end_edit.setText(self._default_point_end_value(file_path=selected_file, metadata=metadata))
         self.control_panel.refresh_merged_edits()
         self.control_panel.color_range_edit.setText("-0.4~0.4")
@@ -1684,7 +1731,7 @@ class MainWindow(QMainWindow):
         self.control_panel.filter_edit.setText("10~")
         self.control_panel.save_filtered_checkbox.setChecked(False)
         self.control_panel.save_as_txt_checkbox.setChecked(False)
-        self.control_panel.waveform_point_edit.setText(self.control_panel.point_start_edit.text().strip() or "1")
+        self.control_panel.waveform_point_edit.setText(self.control_panel.point_start_edit.text().strip() or "0")
         self.control_panel.fk_spacing_edit.setText("5")
         self.control_panel.fk_vmin_edit.setText("800")
         self.control_panel.fk_vmax_edit.setText("1200")
@@ -1729,8 +1776,9 @@ class MainWindow(QMainWindow):
 
         start_point = int(self.control_panel.point_start_edit.text().strip())
         end_point = int(self.control_panel.point_end_edit.text().strip())
-        if start_point < 1 or end_point > self.current_metadata.points or start_point > end_point:
+        if start_point < self.current_metadata.channel_start or end_point > self.current_metadata.channel_end or start_point > end_point:
             raise ValueError("Invalid point range.")
+        self.current_metadata.channel_slice(start_point, end_point)
         return start_point, end_point
 
     def _read_waveform_point(self, start_point: int, end_point: int) -> int:
@@ -1747,6 +1795,7 @@ class MainWindow(QMainWindow):
         if waveform_point < start_point or waveform_point > end_point:
             raise ValueError(f"指定位置点必须位于 Point Start 和 Point End 之间（{start_point}-{end_point}）。")
 
+        self.current_metadata.channel_index(waveform_point)
         return waveform_point
 
     def _read_color_range(self) -> tuple[float | None, float | None]:
@@ -1769,8 +1818,9 @@ class MainWindow(QMainWindow):
         if points is None and file_path is not None:
             points = infer_points_from_filename(file_path)
         if points is None:
-            return str(self.AUTO_POINT_CAP)
-        return str(max(1, min(points, self.AUTO_POINT_CAP)))
+            return str(self.AUTO_POINT_CAP - 1)
+        last_index = max(0, min(points, self.AUTO_POINT_CAP) - 1)
+        return str(metadata.channel_start + last_index * metadata.channel_step if metadata else last_index)
 
     def _apply_auto_point_limit(
         self,
@@ -1781,13 +1831,15 @@ class MainWindow(QMainWindow):
             points = metadata.points if metadata is not None else None
             if points is None and file_path is not None:
                 points = infer_points_from_filename(file_path)
-            self._clamp_point_range_to_points(points)
+            self._clamp_point_range_to_points(points, metadata)
             return
+        if metadata:
+            self.control_panel.point_start_edit.setText(str(metadata.channel_start))
         self.control_panel.point_end_edit.setText(self._default_point_end_value(file_path=file_path, metadata=metadata))
         self._sync_waveform_point_bounds()
         self.control_panel.refresh_merged_edits()
 
-    def _clamp_point_range_to_points(self, points: int | None) -> None:
+    def _clamp_point_range_to_points(self, points: int | None, metadata: FileMetadata | None = None) -> None:
         """Keep the user-owned point range across files; clamp only out-of-range values."""
         if points is None or points < 1:
             return
@@ -1798,8 +1850,10 @@ class MainWindow(QMainWindow):
             end_value = int(end_text)
         except ValueError:
             return
-        new_start = max(1, min(start_value, points))
-        new_end = max(new_start, min(end_value, points))
+        origin = metadata.channel_start if metadata else 0
+        step = metadata.channel_step if metadata else 1
+        new_start = origin + max(0, min((start_value-origin)//step, points-1)) * step
+        new_end = max(new_start, origin + max(0, min((end_value-origin)//step, points-1)) * step)
         if new_start != start_value:
             self.control_panel.point_start_edit.setText(str(new_start))
         if new_end != end_value:
@@ -1816,7 +1870,8 @@ class MainWindow(QMainWindow):
             return
         if start_point > end_point:
             return
-        self.control_panel.set_waveform_point_bounds(start_point, end_point)
+        step = self.current_metadata.channel_step if self.current_metadata else 1
+        self.control_panel.set_waveform_point_bounds(start_point, end_point, step)
 
     def _on_point_range_text_edited(self, _text: str) -> None:
         self._point_end_manual_override = True
@@ -1868,8 +1923,8 @@ class MainWindow(QMainWindow):
 
             point_count = max(self.current_metadata.points, 1)
             y_span = max(y_range[1] - y_range[0], 1.0)
-            y_min = 1.0
-            y_max_start = max(point_count + 1 - y_span, y_min)
+            y_min = float(self.current_metadata.channel_start)
+            y_max_start = max(y_min + point_count * self.current_metadata.channel_step - y_span, y_min)
             y_start = min(max(y_range[0], y_min), y_max_start)
 
             x_page = max(1, int(round(1000 * (x_span / duration))))
@@ -1877,7 +1932,7 @@ class MainWindow(QMainWindow):
             self.horizontal_scroll.setPageStep(min(x_page, 1000))
             self.horizontal_scroll.setValue(min(max(x_value, 0), 1000))
 
-            y_page = max(1, int(round(1000 * (y_span / point_count))))
+            y_page = max(1, int(round(1000 * (y_span / (point_count * self.current_metadata.channel_step)))))
             y_value = int(
                 round(1000 * ((y_start - y_min) / max(y_max_start - y_min, 1e-9)))
             ) if y_max_start > y_min else 0
@@ -1900,8 +1955,8 @@ class MainWindow(QMainWindow):
             return
         _, y_range = self.space_time_view.current_ranges()
         span = max(y_range[1] - y_range[0], 1.0)
-        max_start = max((self.current_metadata.points + 1) - span, 1.0)
-        start = 1.0 + (value / 1000.0) * max(max_start - 1.0, 0.0)
+        max_start = max(self.current_metadata.points * self.current_metadata.channel_step - span, 0.0)
+        start = self.current_metadata.channel_start + (value / 1000.0) * max_start
         self.space_time_view.set_y_range(start, start + span)
 
     def _on_colormap_changed(self, colormap_name: str) -> None:
@@ -1985,7 +2040,7 @@ class MainWindow(QMainWindow):
         _, y_range = view.current_ranges()
         span = max(y_range[1] - y_range[0], 1e-9)
         lower = float(view._y_start_point)
-        upper = float(view._y_end_point) + 1.0
+        upper = float(view._y_end_point + view._metadata.channel_step)
         if span >= (upper - lower):
             return
         delta = span * 0.16 * direction
@@ -2063,82 +2118,57 @@ class MainWindow(QMainWindow):
         export_folder = Path(export_folder_text)
         export_folder.mkdir(parents=True, exist_ok=True)
 
-        save_filtered = self.control_panel.save_filtered_checkbox.isChecked()
-        save_as_txt = self.control_panel.save_as_txt_checkbox.isChecked()
-
+        try:
+            request = self._capture_export_request()
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
         self.statusBar().showMessage("Exporting current view ...")
-        worker = FunctionWorker(
-            self._export_current_view_data,
-            export_folder,
-            save_filtered,
-            save_as_txt,
-        )
+        worker = FunctionWorker(export_view, request, export_folder)
         self._active_workers.add(worker)
         worker.signals.result.connect(self._on_export_finished)
         worker.signals.error.connect(self._show_error)
         worker.signals.finished.connect(lambda w=worker: self._on_worker_finished(w))
         self.thread_pool.start(worker)
 
-    def _export_current_view_data(
-        self,
-        export_folder: Path,
-        save_processed: bool,
-        save_as_txt: bool,
-    ) -> dict:
-        if self.current_metadata is None:
-            raise ValueError("No file loaded.")
-
+    def _capture_export_request(self, save_processed=None, save_as_txt=None,
+                                export_format=None, time_step=None, space_step=None) -> ViewExportRequest:
+        """Snapshot GUI state before dispatch, so workers never read changing widgets."""
         metadata = self.current_metadata
+        if metadata is None:
+            raise ValueError("No file loaded.")
+        if getattr(self, "loaded_file_paths", []) != self.current_file_paths:
+            raise ValueError("所选数据仍在加载，请等待加载完成后导出。")
+        panel = self.control_panel
+        if export_format is not None:
+            fmt = export_format.lower()
+        elif save_as_txt is not None:
+            fmt = "txt" if save_as_txt else "bin"
+        else:
+            fmt = panel.export_format_combo.currentText().lower()
+        tstep = int(panel.export_time_step_edit.text()) if time_step is None else time_step
+        sstep = int(panel.export_space_step_edit.text()) if space_step is None else space_step
+        if tstep < 1 or sstep < 1:
+            raise ValueError("时间和空间步长必须为正整数。")
         x_range, y_range = self.space_time_view.current_ranges()
         frame_start = max(0, int(np.floor(x_range[0] * metadata.sample_rate_hz)))
         frame_end = min(metadata.frame_count, int(np.ceil(x_range[1] * metadata.sample_rate_hz)))
-        point_start = max(1, int(np.floor(y_range[0])))
-        point_end = min(metadata.points, int(np.ceil(y_range[1]) - 1))
-
-        if frame_end <= frame_start or point_end < point_start:
-            raise ValueError("Current view is empty and cannot be exported.")
-
-        point_slice = slice(point_start - 1, point_end)
-        frame_slice = slice(frame_start, frame_end)
-
-        if save_processed or len(self.current_file_paths) > 1:
-            if self.current_data is None:
-                raise ValueError("No processed data loaded.")
-            export_phase_slice = np.ascontiguousarray(self.current_data[frame_slice, point_slice], dtype=np.float32)
-            export_raw_slice = None
-        else:
-            raw_data = read_bin_memmap(metadata)
-            export_raw_slice = np.ascontiguousarray(raw_data[frame_slice, point_slice], dtype=np.int32)
-            export_phase_slice = convert_raw_to_radians(export_raw_slice)
-
-        filename = build_export_filename(
-            metadata=metadata,
-            point_count=point_end - point_start + 1,
-            time_offset_s=frame_start / metadata.sample_rate_hz,
-            suffix=".txt" if save_as_txt else ".bin",
-            preserve_leading_token=save_as_txt,
+        column_start = max(0, int(np.floor((y_range[0]-metadata.channel_start)/metadata.channel_step)))
+        column_end = min(metadata.points, int(np.ceil((y_range[1]-metadata.channel_start)/metadata.channel_step)))
+        if frame_start >= frame_end or column_start >= column_end:
+            raise ValueError("当前视图没有可导出的数据。")
+        sources = tuple(getattr(self, "current_source_metadata", ()) or (metadata,))
+        return ViewExportRequest(
+            metadata, sources, self.current_data, frame_start, frame_end, column_start, column_end,
+            tstep, sstep, fmt, panel.save_filtered_checkbox.isChecked() if save_processed is None else save_processed,
+            tuple(self.space_time_view.arrivals.items()),
         )
-        output_path = export_folder / filename
-        if save_as_txt:
-            write_phase_txt(output_path, export_phase_slice)
-            export_dtype = str(export_phase_slice.dtype)
-            export_format = "txt"
-        else:
-            if export_raw_slice is None:
-                export_slice = np.ascontiguousarray(convert_radians_to_raw(export_phase_slice))
-            else:
-                export_slice = export_raw_slice
-            export_slice.tofile(output_path)
-            export_dtype = str(export_slice.dtype)
-            export_format = "bin"
-        return {
-            "output_path": output_path,
-            "frame_count": export_phase_slice.shape[0],
-            "point_count": export_phase_slice.shape[1],
-            "filtered": save_processed,
-            "dtype": export_dtype,
-            "format": export_format,
-        }
+
+    def _export_current_view_data(self, export_folder: Path, save_processed: bool,
+                                  save_as_txt: bool, export_format=None, time_step=None, space_step=None) -> dict:
+        """Synchronous entry retained for regression tests and callers."""
+        request = self._capture_export_request(save_processed, save_as_txt, export_format, time_step, space_step)
+        return export_view(request, export_folder)
 
     def _on_export_finished(self, payload: dict) -> None:
         filtered_text = "filtered" if payload["filtered"] else "unfiltered"
@@ -2146,7 +2176,7 @@ class MainWindow(QMainWindow):
             (
                 f"Exported {filtered_text} {payload['format']} view to {payload['output_path']} | "
                 f"Frames: {payload['frame_count']} | Points: {payload['point_count']} | "
-                f"Type: {payload['dtype']}"
+                f"Type: {payload['dtype']} | Fs: {payload['sample_rate_hz']:g} Hz | Arrival picks: {payload['arrival_count']}"
             )
         )
 

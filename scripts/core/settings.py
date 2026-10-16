@@ -7,6 +7,8 @@ different data file is loaded.
 
 from __future__ import annotations
 
+import re
+
 from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QCheckBox, QComboBox, QLineEdit, QWidget
 
@@ -28,13 +30,49 @@ class ParameterStore:
             "eDASread",
         )
 
+    def _migrate_channel_indices(self) -> None:
+        """Convert legacy persisted channel labels once, retaining physical columns."""
+        if int(self._settings.value("schema/channel_index_base", 1)) == 0:
+            return
+        keys = (
+            "tab1/point_range", "tab1/point_start", "tab1/point_end",
+            "tab1/waveform_point", "tab2/channels", "tab3/channel_range",
+            "tab4/channel", "tab5/channel_start", "tab5/channel_end",
+        )
+        for key in keys:
+            if self._settings.contains(key):
+                text = str(self._settings.value(key))
+                # Only channel fields are converted; counts, spacing and time stay unchanged.
+                converted = re.sub(r"\d+", lambda m: str(max(0, int(m.group()) - 1)), text)
+                self._settings.setValue(key, converted)
+        if not self._settings.contains("tab1/point_range") and all(
+            self._settings.contains(key) for key in ("tab1/point_start", "tab1/point_end")
+        ):
+            start = self._settings.value("tab1/point_start")
+            end = self._settings.value("tab1/point_end")
+            self._settings.setValue("tab1/point_range", f"{start}~{end}")
+        self._settings.setValue("schema/channel_index_base", 0)
+        self._settings.sync()
+
+    def interface_font_size(self) -> int:
+        try:
+            return max(12, min(28, int(self._settings.value("appearance/font_size_px", 18))))
+        except (TypeError, ValueError):
+            return 18
+
+    def save_interface_font_size(self, size: int) -> None:
+        self._settings.setValue("appearance/font_size_px", max(12, min(28, int(size))))
+        self._settings.sync()
+
     def save_widgets(self, widgets: dict[str, QWidget]) -> None:
+        self._settings.setValue("schema/channel_index_base", 0)
         for key, widget in widgets.items():
             self._settings.setValue(key, self._widget_value(widget))
         self._settings.sync()
 
     def restore_widgets(self, widgets: dict[str, QWidget]) -> set[str]:
         """Apply persisted values; return the set of restored keys."""
+        self._migrate_channel_indices()
         restored: set[str] = set()
         for key, widget in widgets.items():
             if not self._settings.contains(key):

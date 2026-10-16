@@ -23,12 +23,12 @@ def prepare_image_matrix(
     start_point: int,
     end_point: int,
 ) -> np.ndarray:
-    """Extract a 1-based point range and return an image matrix as points x frames."""
-    if start_point < 1 or end_point < start_point or end_point > frame_data.shape[1]:
+    """Extract a 0-based inclusive point range and return an image matrix as points x frames."""
+    if start_point < 0 or end_point < start_point or end_point >= frame_data.shape[1]:
         raise ValueError("Invalid point range.")
 
-    # UI uses 1-based labels while the internal matrix uses zero-based indices.
-    point_slice = slice(start_point - 1, end_point)
+    # UI labels and matrix indices are both zero-based; the range end is inclusive.
+    point_slice = slice(start_point, end_point + 1)
     return np.ascontiguousarray(frame_data[:, point_slice].T)
 
 

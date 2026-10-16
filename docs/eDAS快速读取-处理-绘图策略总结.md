@@ -123,7 +123,7 @@ robust_abs_percentile(values, 95.0)
 
 - `Export Current View` 按可视窗口：
   - `frame_start = floor(x0 * fs)`，`frame_end = ceil(x1 * fs)`
-  - `point_start = floor(y0)`，`point_end = ceil(y1) - 1`
+  - 位置点从 0 开始：`point_start = max(0, floor(y0))`，`point_end = min(N-1, ceil(y1)-1)`；含终点，数组切片为 `[:, point_start:point_end+1]`
 - 未勾选 `Save Filtered Data`：直接切原始 memmap（`.bin`）或原始 `int32` 数组，不往返转换。
 - 勾选后：从滤波结果切片，`rad -> int32`。
 - 勾选 `Save as txt`：导出 `frames x points` 的 `rad` 浮点矩阵。
